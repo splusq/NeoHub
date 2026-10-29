@@ -199,6 +199,9 @@ namespace NeoHub.Services.Handlers
                 var zone = _panelState.GetZone(sessionId, zoneNum)
                     ?? new ZoneState { ZoneNumber = zoneNum };
 
+                if (z < zoneDefs.Count)
+                    zone.Definition = zoneDefs[z];
+
                 // Labels
                 if (z < zoneLabels.Count)
                 {

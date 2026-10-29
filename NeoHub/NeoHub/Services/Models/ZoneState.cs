@@ -19,6 +19,8 @@ namespace NeoHub.Services.Models
         public bool IsFaulted { get; set; }
         public bool IsTampered { get; set; }
         public bool IsBypassed { get; set; }
+        /// <summary>Zone definition from installer section [001]; null unless the installer config was read.</summary>
+        public PanelConfiguration.Sections.ZoneDefinition? Definition { get; set; }
         public List<byte> Partitions { get; set; } = new(); // Which partitions this zone is associated with
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
     }

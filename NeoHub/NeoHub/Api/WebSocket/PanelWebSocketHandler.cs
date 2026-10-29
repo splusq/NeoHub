@@ -6,6 +6,7 @@ using System.Text.Json;
 using DSC.TLink.ITv2.MediatR;
 using NeoHub.Api.WebSocket.Models;
 using NeoHub.Services;
+using NeoHub.Services.PanelConfiguration.Sections;
 
 namespace NeoHub.Api.WebSocket
 {
@@ -407,10 +408,46 @@ namespace NeoHub.Api.WebSocket
 
         #region Helpers
 
+        /// <summary>
+        /// Maps the zone's panel definition to a Home Assistant binary_sensor device class.
+        /// The definition says how the panel treats the zone, not what hardware is wired to it,
+        /// so this is a best guess. Without the installer config (no definition) every zone is "door".
+        /// </summary>
         private static string DetermineDeviceClass(Services.Models.ZoneState zone)
         {
-            // TODO: Zone type configuration
-            return "door";
+            return zone.Definition switch
+            {
+                ZoneDefinition.Interior or
+                ZoneDefinition.InteriorStayAway or
+                ZoneDefinition.InteriorDelay or
+                ZoneDefinition.NightZone => "motion",
+
+                ZoneDefinition.Delayed24HourFire or
+                ZoneDefinition.Standard24HourFire or
+                ZoneDefinition.AutoVerifiedFire => "smoke",
+
+                ZoneDefinition.Heat24Hour or
+                ZoneDefinition.HighTemperature24Hour => "heat",
+                ZoneDefinition.LowTemperature24Hour => "cold",
+                ZoneDefinition.CO24Hour => "carbon_monoxide",
+                ZoneDefinition.Gas24Hour => "gas",
+                ZoneDefinition.Flood24Hour => "moisture",
+
+                ZoneDefinition.Holdup24Hour or
+                ZoneDefinition.Panic24Hour or
+                ZoneDefinition.Medical24Hour or
+                ZoneDefinition.Emergency24Hour or
+                ZoneDefinition.Sprinkler24Hour => "safety",
+
+                ZoneDefinition.LatchingTamper24Hour or
+                ZoneDefinition.NonLatchingTamper24Hour => "tamper",
+
+                ZoneDefinition.Supervisory24Hour or
+                ZoneDefinition.SupervisoryBuzzer24Hour or
+                ZoneDefinition.FireSupervisory => "problem",
+
+                _ => "door"
+            };
         }
 
         #endregion

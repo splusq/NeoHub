@@ -2,14 +2,21 @@
 
 A real-time web portal for monitoring and controlling DSC PowerSeries NEO alarm panels via the ITv2 (TLink) protocol. Built with Blazor Server, MudBlazor, and MediatR.
 
-[![Build and Publish Docker Image](https://github.com/BrianHumlicek/NeoHub/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/BrianHumlicek/NeoHub/actions/workflows/docker-publish.yml)
+> This is the [splusq](https://github.com/splusq/NeoHub) fork of [BrianHumlicek/NeoHub](https://github.com/BrianHumlicek/NeoHub). It runs on .NET 10, ships a smaller non-root image, and reports each zone's `device_class` from the panel's zone definitions (see [Zone device classes](#zone-device-classes)).
+
+[![Build and Publish Docker Image](https://github.com/splusq/NeoHub/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/splusq/NeoHub/actions/workflows/docker-publish.yml)
 
 ## 🐳 Container Images
 
 | Registry | Image | Pull Command |
 |---|---|---|
-| GitHub Container Registry | [`ghcr.io/brianhumlicek/neohub`](https://ghcr.io/brianhumlicek/neohub) | `docker pull ghcr.io/brianhumlicek/NeoHub:latest` |
-| Docker Hub | [`brianhumlicek/neohub`](https://hub.docker.com/r/brianhumlicek/neohub) | `docker pull brianhumlicek/NeoHub:latest` |
+| GitHub Container Registry | [`ghcr.io/splusq/neohub`](https://ghcr.io/splusq/neohub) | `docker pull ghcr.io/splusq/neohub:latest` |
+
+The image is based on Microsoft's Ubuntu chiseled ASP.NET runtime: no shell or package manager, and the app runs as the non-root `app` user (UID 1654). A host folder mounted at `/app/persist` must be writable by that user:
+
+````````
+sudo chown -R 1654:1654 ./persist
+````````
 
 ---
 
@@ -20,7 +27,7 @@ A real-time web portal for monitoring and controlling DSC PowerSeries NEO alarm 
 1. Clone the repository (or download the `docker-compose.yml`):
 
 ````````
-git clone https://github.com/BrianHumlicek/NeoHub.git
+git clone https://github.com/splusq/NeoHub.git
 cd NeoHub
 ````````
 
@@ -32,7 +39,7 @@ version: '3.8'
 
 services:
   neohub:
-    image: ghcr.io/brianhumlicek/neohub:latest
+    image: ghcr.io/splusq/neohub:latest
     container_name: neohub
     ports:
       - "8080:5181"
@@ -62,7 +69,7 @@ docker run -d --name neohub \
   -e ASPNETCORE_URLS=http://+:8080 \
   -e EnableHttps=false \
   -v ./persist:/app/persist \
-  ghcr.io/brianhumlicek/neohub:latest
+  ghcr.io/splusq/neohub:latest
 ````````
 
 ### Getting Started
@@ -224,6 +231,28 @@ Once the panel has been configured, return to the NeoHub web UI. If everything i
 
 ---
 
+## Zone device classes
+
+Each zone in the `/api/ws` `full_state` message carries a `device_class`, using Home Assistant's binary sensor device classes. When an **Installer Code** is set on the Connections page, NeoHub reads the zone definitions (installer section [001]) on connect and maps them:
+
+| Zone definition | `device_class` |
+|---|---|
+| Interior, Interior Stay/Away, Interior Delay, Night | `motion` |
+| 24-Hour Fire, Delayed 24-Hour Fire, Auto Verified Fire | `smoke` |
+| 24-Hour Heat, 24-Hour High Temperature | `heat` |
+| 24-Hour Low Temperature | `cold` |
+| 24-Hour CO | `carbon_monoxide` |
+| 24-Hour Gas | `gas` |
+| 24-Hour Flood | `moisture` |
+| 24-Hour Holdup, Panic, Medical, Emergency, Sprinkler | `safety` |
+| 24-Hour Latching/Non-Latching Tamper | `tamper` |
+| 24-Hour Supervisory, Supervisory Buzzer, Fire Supervisory | `problem` |
+| Everything else (Delay, Instant, Stay/Away, Day, keyswitch, ...) | `door` |
+
+A definition describes how the panel treats a zone, not what is wired to it: a glass-break detector on an Instant zone still reports `door`. Without an installer code every zone reports `door`.
+
+---
+
 ## 🔌 Ports
 
 | Port | Protocol | Purpose |
@@ -238,7 +267,7 @@ Once the panel has been configured, return to the NeoHub web UI. If everything i
 
 ### Prerequisites
 
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 
 ### Local Development
 
