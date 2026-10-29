@@ -1,14 +1,15 @@
 name: Build and Publish Docker Image
 
+# Pushes to master publish ghcr.io/<owner>/neohub (latest, branch and sha tags).
+# Pull requests build the image for both architectures without pushing it.
 on:
   push:
     branches: [ master, main ]
+  pull_request:
   workflow_dispatch:
 
 env:
   REGISTRY_GHCR: ghcr.io
-  # Replace 'your-dockerhub-username' with your actual Docker Hub ID
-  DOCKERHUB_REPO: brianhumlicek/${{ github.event.repository.name }}
 
 jobs:
   build-and-push:
@@ -19,49 +20,36 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
+      # No QEMU needed: the Dockerfile cross-compiles on the runner's architecture.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      # 1. Login to GitHub Container Registry
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY_GHCR }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. Login to Docker Hub (Add your secrets first!)
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # 3. Extract metadata for BOTH registries
       - name: Extract metadata (tags, labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: |
-            ${{ env.REGISTRY_GHCR }}/${{ github.repository }}
-            ${{ env.DOCKERHUB_REPO }}
+          images: ${{ env.REGISTRY_GHCR }}/${{ github.repository }}
           tags: |
             type=ref,event=branch
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
 
-      # 4. Build once and push to both
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |

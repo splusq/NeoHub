@@ -7,6 +7,7 @@ using NeoHub.Services.Diagnostics;
 using NeoHub.Api.WebSocket;
 using NeoHub.Services.PanelConfiguration;
 using MudBlazor.Services;
+using Microsoft.AspNetCore.DataProtection;
 
 namespace NeoHub
 {
@@ -23,8 +24,15 @@ namespace NeoHub
             // Path respects NEOHUB_PERSIST_PATH env var (used by HA addon to point to addon_config).
             builder.Configuration.AddJsonFile(
                 SettingsPersistenceService.GetSettingsFilePath(builder.Environment.ContentRootPath),
-                optional: true, 
+                optional: true,
                 reloadOnChange: true);
+
+            // Keep data protection keys (antiforgery and circuit tokens) in the persist folder,
+            // so open browser sessions survive a container upgrade.
+            builder.Services.AddDataProtection()
+                .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(
+                    SettingsPersistenceService.GetPersistPath(builder.Environment.ContentRootPath),
+                    "DataProtection-Keys")));
 
             // Register settings
             builder.Services.Configure<PanelConnectionsSettings>(
@@ -139,6 +147,9 @@ namespace NeoHub
                 await handler.HandleConnectionAsync(context);
             });
 
+            // Since .NET 9, framework assets such as _framework/blazor.web.js are
+            // served from the static assets manifest, not by UseStaticFiles.
+            app.MapStaticAssets();
             app.MapRazorComponents<App>()
                 .AddInteractiveServerRenderMode();
 

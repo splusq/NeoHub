@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   neohub:
-    image: ghcr.io/brianhumlicek/neohub:latest
+    image: ghcr.io/splusq/neohub:latest
     container_name: neohub
     ports:
       - "8080:5181"
