@@ -1,0 +1,41 @@
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week before proposing a new version, so compromised releases
+    # are usually caught and pulled before they can be auto-merged.
+    cooldown:
+      default-days: 7
+    groups:
+      nuget-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # The Dockerfile pins each base image by digest, so Microsoft's patched
+  # rebuilds of the same tag (security fixes) arrive as PRs here.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      dotnet-images:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week before proposing a new version, so compromised releases
+    # are usually caught and pulled before they can be auto-merged.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
