@@ -26,18 +26,8 @@ internal interface IITv2Session : IAsyncDisposable
     string SessionId { get; }
 
     /// <summary>
-    /// Cancelled when this connection ends for any reason (transport closed, END_SESSION,
-    /// heartbeat gave up, replaced by a reconnect, disposed). Work tied to this connection,
-    /// such as the initial configuration pull, should stop when it fires.
-    /// </summary>
-    CancellationToken Lifetime { get; }
-
-    /// <summary>
     /// Send a message and wait for the protocol+command transaction to complete.
     /// Returns the command response for command messages, or the original message for notifications.
-    /// Commands run one at a time per session. Fails with <see cref="TLinkErrorCode.Timeout"/> if
-    /// the panel doesn't answer in time and <see cref="TLinkErrorCode.Disconnected"/> if the
-    /// session ends first; only cancellation of <paramref name="ct"/> throws.
     /// </summary>
     Task<Result<IMessageData>> SendAsync(IMessageData message, CancellationToken ct = default);
 

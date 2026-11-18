@@ -79,7 +79,7 @@ namespace NeoHub.Services.Settings
 
                 var options = new JsonSerializerOptions { WriteIndented = true };
                 var updatedJson = JsonSerializer.Serialize(rootSettings, options);
-                await AtomicFile.WriteAllTextAsync(SettingsFilePath, updatedJson);
+                await File.WriteAllTextAsync(SettingsFilePath, updatedJson);
 
                 _log.LogInformation("Saved settings for section {Section}", sectionName);
             }

@@ -10,12 +10,6 @@ namespace NeoHub.Services
         void UpdateSession(string sessionId, Action<SessionState> update);
         void RemoveSession(string sessionId);
 
-        /// <summary>
-        /// The programming-mode lock for a panel ID. The same instance for the life of the
-        /// process, across disconnects and reconnects; also exposed as SessionState.ConfigLock.
-        /// </summary>
-        SemaphoreSlim GetConfigLock(string sessionId);
-
         // Partition operations (partition belongs to session)
         PartitionState? GetPartition(string sessionId, byte partitionNumber);
         IReadOnlyDictionary<byte, PartitionState> GetPartitions(string sessionId);

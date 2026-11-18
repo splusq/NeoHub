@@ -169,7 +169,7 @@ public class PanelUserListFileService : IPanelUserListFileService
 
         var path = Path.Combine(_dir, Path.GetFileName(fileName));
         var bytes = ExportToBytes(userList, maxUsers, maxPartitions);
-        await AtomicFile.WriteAllBytesAsync(path, bytes);
+        await File.WriteAllBytesAsync(path, bytes);
         _logger.LogInformation("Saved user list to {Path}", path);
     }
 

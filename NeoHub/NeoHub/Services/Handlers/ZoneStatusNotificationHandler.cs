@@ -37,9 +37,8 @@ namespace NeoHub.Services.Handlers
 
             // TODO: No protocol-level way to get zone-partition mapping yet.
             // For now, assign all zones to partition 1.
-            // Replaced, never mutated: readers may be enumerating the current list.
-            if (zone.Partitions.Count == 0)
-                zone.Partitions = [1];
+            if (!zone.Partitions.Any())
+                zone.Partitions.Add(1);
 
             _logger.LogDebug(
                 "Zone {Zone} is now {Status} (Associated Partitions: {Partitions})",
