@@ -73,7 +73,7 @@ namespace DSC.TLink
                 }
                 finally
                 {
-                    sessionManager.UnregisterSession(session.SessionId);
+                    sessionManager.UnregisterSession(session.SessionId, session);
                 }
             }
             catch (OperationCanceledException) when (connection.ConnectionClosed.IsCancellationRequested)

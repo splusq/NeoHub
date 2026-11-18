@@ -67,6 +67,15 @@ internal sealed class ITv2Session : IITv2Session
     private readonly TaskCompletionSource _sessionReady = new();
     private Timer? _readyTimer;
 
+    // Liveness — a half-open TCP connection (panel lost power or its link dropped) is
+    // otherwise never noticed. Any inbound packet proves the panel is alive.
+    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(100);
+    private static readonly TimeSpan HeartbeatAckTimeout = TimeSpan.FromSeconds(30);
+    private const int MaxMissedHeartbeats = 3;
+    private long _lastReceiveTicks = Environment.TickCount64;
+
+    private int _disposed;
+
     private ITv2Session(
         ITLinkTransport transport,
         IConnectionSettingsProvider settingsProvider,
@@ -227,10 +236,27 @@ internal sealed class ITv2Session : IITv2Session
     public async IAsyncEnumerable<IMessageData> GetNotificationsAsync(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+            yield break;
+
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdownCts.Token);
-        await foreach (var notification in _notificationChannel.Reader.ReadAllAsync(linkedCts.Token))
+        var reader = _notificationChannel.Reader;
+        while (true)
         {
-            yield return notification;
+            // A session shut down from our side (replaced by a reconnect, END_SESSION, or
+            // disposal) ends the stream cleanly; only the caller's own token throws.
+            try
+            {
+                if (!await reader.WaitToReadAsync(linkedCts.Token))
+                    yield break;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                yield break;
+            }
+
+            while (reader.TryRead(out var notification))
+                yield return notification;
         }
     }
 
@@ -264,6 +290,7 @@ internal sealed class ITv2Session : IITv2Session
 
                 var packet = packetResult.Value;
                 _remoteSequence = packet.SenderSequence;
+                Interlocked.Exchange(ref _lastReceiveTicks, Environment.TickCount64);
 
                 if (packet.Message is not SimpleAck)
                 {
@@ -309,7 +336,7 @@ internal sealed class ITv2Session : IITv2Session
         }
         finally
         {
-            _notificationChannel.Writer.Complete();
+            _notificationChannel.Writer.TryComplete();
         }
     }
 
@@ -533,10 +560,46 @@ internal sealed class ITv2Session : IITv2Session
         {
             await _sessionReady.Task.WaitAsync(ct);
 
+            int missed = 0;
             while (!ct.IsCancellationRequested)
             {
-                await Task.Delay(TimeSpan.FromSeconds(100), ct);
-                await SendAsync(new ConnectionPoll(), ct);
+                await Task.Delay(HeartbeatInterval, ct);
+
+                long sentAt = Environment.TickCount64;
+                bool acked;
+                using (var pollCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    pollCts.CancelAfter(HeartbeatAckTimeout);
+                    try
+                    {
+                        acked = (await SendAsync(new ConnectionPoll(), pollCts.Token)).IsSuccess;
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        acked = false;
+                    }
+                }
+
+                // Count a miss only when the panel sent nothing at all since the poll went out.
+                if (acked || Interlocked.Read(ref _lastReceiveTicks) >= sentAt)
+                {
+                    if (missed > 0)
+                        _logger.LogInformation("Panel responding again after {Missed} missed heartbeat(s)", missed);
+                    missed = 0;
+                    continue;
+                }
+
+                missed++;
+                _logger.LogWarning("Panel did not answer heartbeat ({Missed}/{Max})", missed, MaxMissedHeartbeats);
+
+                if (missed >= MaxMissedHeartbeats)
+                {
+                    _logger.LogWarning("Panel unresponsive; closing session so it can reconnect");
+                    // Ending the notification stream lets the connection handler unregister
+                    // and dispose this session, which closes the socket.
+                    _notificationChannel.Writer.TryComplete();
+                    return;
+                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -555,6 +618,11 @@ internal sealed class ITv2Session : IITv2Session
 
     public async ValueTask DisposeAsync()
     {
+        // The session manager disposes a session it replaced, and the connection handler
+        // disposes it again when its loop ends; only the first call does the work.
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
         if (_sessionReady.Task.IsCompletedSuccessfully)
         {
             try
@@ -574,7 +642,7 @@ internal sealed class ITv2Session : IITv2Session
         _shutdownCts.Cancel();
 
         _readyTimer?.Dispose();
-        _notificationChannel.Writer.Complete();
+        _notificationChannel.Writer.TryComplete();
 
         foreach (var receiver in _pendingReceivers)
             receiver.Dispose();

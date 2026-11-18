@@ -10,7 +10,7 @@ namespace DSC.TLink.ITv2.MediatR
     public interface IITv2SessionManager
     {
         internal void RegisterSession(string sessionId, IITv2Session session);
-        internal void UnregisterSession(string sessionId);
+        internal void UnregisterSession(string sessionId, IITv2Session session);
         internal IITv2Session? GetSession(string sessionId);
         IEnumerable<string> GetActiveSessions();
         Task DisconnectSessionAsync(string sessionId);
@@ -29,27 +29,72 @@ namespace DSC.TLink.ITv2.MediatR
             _logger = logger;
         }
 
+        /// <summary>
+        /// Register a newly connected session. A panel that reconnects (for example after a
+        /// network outage) reuses its session ID while the old, half-open connection may still
+        /// be registered. The newest connection always wins: the stale one is replaced and
+        /// disposed, so commands and state go to the connection the panel is actually using.
+        /// </summary>
         public void RegisterSession(string sessionId, IITv2Session session)
         {
-            if (_sessions.TryAdd(sessionId, session))
+            IITv2Session? stale = null;
+            bool alreadyRegistered = false;
+            _sessions.AddOrUpdate(sessionId, session, (_, existing) =>
+            {
+                alreadyRegistered = ReferenceEquals(existing, session);
+                stale = alreadyRegistered ? null : existing;
+                return session;
+            });
+
+            if (alreadyRegistered)
+                return;
+
+            if (stale is null)
             {
                 _logger.LogInformation("Session registered. Active sessions: {Count}",
                     _sessions.Count);
                 PublishLifecycleNotification(new SessionConnectedNotification(sessionId));
+                return;
             }
-            else
-            {
-                _logger.LogWarning("Session already registered");
-            }
+
+            _logger.LogWarning("Panel reconnected while a previous session was still registered; replacing the stale session");
+
+            // Reset state for the old connection before the new one starts its configuration pull.
+            PublishLifecycleNotifications(
+                new SessionDisconnectedNotification(sessionId),
+                new SessionConnectedNotification(sessionId));
+
+            _ = DisposeStaleSessionAsync(stale);
         }
 
-        public void UnregisterSession(string sessionId)
+        /// <summary>
+        /// Unregister a session when its connection closes. Only removes the entry if it still
+        /// belongs to this session instance; a superseded session closing must not remove the
+        /// live connection that replaced it.
+        /// </summary>
+        public void UnregisterSession(string sessionId, IITv2Session session)
         {
-            if (_sessions.TryRemove(sessionId, out _))
+            if (_sessions.TryRemove(new KeyValuePair<string, IITv2Session>(sessionId, session)))
             {
                 _logger.LogInformation("Session unregistered. Active sessions: {Count}",
                     _sessions.Count);
                 PublishLifecycleNotification(new SessionDisconnectedNotification(sessionId));
+            }
+            else
+            {
+                _logger.LogInformation("Superseded session closed; the current session stays registered");
+            }
+        }
+
+        private async Task DisposeStaleSessionAsync(IITv2Session stale)
+        {
+            try
+            {
+                await stale.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Error disposing stale session");
             }
         }
 
@@ -83,15 +128,24 @@ namespace DSC.TLink.ITv2.MediatR
             return _sessions.Keys.ToList();
         }
 
-        private async void PublishLifecycleNotification(INotification notification)
+        private void PublishLifecycleNotification(INotification notification)
+            => PublishLifecycleNotifications(notification);
+
+        /// <summary>
+        /// Publish notifications in order, without blocking the caller.
+        /// </summary>
+        private async void PublishLifecycleNotifications(params INotification[] notifications)
         {
-            try
+            foreach (var notification in notifications)
             {
-                await _mediator.Publish(notification);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error publishing session lifecycle notification");
+                try
+                {
+                    await _mediator.Publish(notification);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error publishing session lifecycle notification");
+                }
             }
         }
     }
