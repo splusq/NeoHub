@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace DSC.TLink.ITv2.MediatR
+namespace DSC.TLink.ITv2.Sessions
 {
     /// <summary>
     /// Proactively disconnects all active ITv2 sessions when the host is shutting down,

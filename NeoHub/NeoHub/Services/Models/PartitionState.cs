@@ -35,25 +35,19 @@ namespace NeoHub.Services.Models
         /// The effective status, accounting for exit delay.
         /// During exit delay, this returns Arming regardless of the stored Status.
         /// </summary>
-        public PartitionStatus EffectiveStatus =>
-            ExitDelayActive && ExitDelayRemaining.HasValue && ExitDelayRemaining.Value > TimeSpan.Zero
+        public PartitionStatus EffectiveStatusAt(DateTime nowUtc) =>
+            ExitDelayActive && ExitDelayRemainingAt(nowUtc) is { } left && left > TimeSpan.Zero
                 ? PartitionStatus.Arming
                 : Status;
 
-        /// <summary>
-        /// Remaining exit delay for display, or null if no delay is active. (Reads the clock: a
-        /// presentation helper, not state.)
-        /// </summary>
-        public TimeSpan? ExitDelayRemaining
+        /// <summary>Remaining exit delay at <paramref name="nowUtc"/>, or null if no delay is active.</summary>
+        public TimeSpan? ExitDelayRemainingAt(DateTime nowUtc)
         {
-            get
-            {
-                if (!ExitDelayActive || !ExitDelayStartedAt.HasValue)
-                    return null;
-                var elapsed = DateTime.UtcNow - ExitDelayStartedAt.Value;
-                var remaining = TimeSpan.FromSeconds(ExitDelayDurationSeconds) - elapsed;
-                return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
-            }
+            if (!ExitDelayActive || !ExitDelayStartedAt.HasValue)
+                return null;
+            var elapsed = nowUtc - ExitDelayStartedAt.Value;
+            var remaining = TimeSpan.FromSeconds(ExitDelayDurationSeconds) - elapsed;
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
         }
     }
 }

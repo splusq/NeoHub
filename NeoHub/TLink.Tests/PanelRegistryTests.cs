@@ -1,8 +1,7 @@
 using System.Threading.Channels;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
 using DSC.TLink.ITv2.Messages;
 using DSC.TLink.ITv2.Runtime;
-using MediatR;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace DSC.TLink.Tests;
@@ -13,21 +12,15 @@ namespace DSC.TLink.Tests;
 /// </summary>
 public class PanelRegistryTests
 {
-    private sealed class NoPublisher : IPublisher
-    {
-        public Task Publish(object notification, CancellationToken ct = default) => Task.CompletedTask;
-        public Task Publish<T>(T notification, CancellationToken ct = default) where T : INotification => Task.CompletedTask;
-    }
-
     private sealed class Fixture : IAsyncDisposable
     {
-        public PanelRegistry Registry { get; } = new(new NoPublisher(), NullLogger<PanelRegistry>.Instance);
-        public Channel<INotification> Events { get; } = Channel.CreateUnbounded<INotification>();
+        private readonly PanelLifecycle _lifecycle = new();
+        public PanelRegistry Registry { get; }
 
-        public Fixture() => Registry.Delivered += n => Events.Writer.TryWrite(n);
+        public Fixture() => Registry = new(_lifecycle, NullLogger<PanelRegistry>.Instance);
 
         public async Task<string> NextEventAsync()
-            => (await Events.Reader.ReadAsync().AsTask().WaitAsync(PanelSimulator.Guard)) switch
+            => (await _lifecycle.Events.ReadAsync().AsTask().WaitAsync(PanelSimulator.Guard)) switch
             {
                 SessionConnectedNotification c => $"connected {c.SessionId}",
                 SessionDisconnectedNotification d => $"disconnected {d.SessionId}",

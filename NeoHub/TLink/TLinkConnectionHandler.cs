@@ -16,7 +16,7 @@
 
 using System.Security.Cryptography;
 using DSC.TLink.ITv2;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
 using DSC.TLink.ITv2.Protocol;
 using DSC.TLink.ITv2.Runtime;
 using Microsoft.AspNetCore.Connections;

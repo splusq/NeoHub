@@ -87,7 +87,9 @@ public class PanelOperationsTests : IAsyncLifetime
         var op = _ops.RunAsync("p1", "long", async ct =>
         {
             started.SetResult();
-            await Task.Delay(Timeout.Infinite, ct);
+            var never = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var _ = ct.Register(() => never.TrySetCanceled(ct));
+            await never.Task;   // only cancellation ends it
             return 0;
         }, cancel.Token);
         await started.Task.WaitAsync(Guard);

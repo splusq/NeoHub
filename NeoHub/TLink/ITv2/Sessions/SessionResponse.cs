@@ -1,6 +1,6 @@
 ﻿using DSC.TLink.ITv2.Messages;
 
-namespace DSC.TLink.ITv2.MediatR;
+namespace DSC.TLink.ITv2.Sessions;
 
 /// <summary>
 /// Response from a <see cref="SessionCommand"/>.

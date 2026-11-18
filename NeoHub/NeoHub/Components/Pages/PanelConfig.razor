@@ -4,8 +4,9 @@
 @using NeoHub.Services.Settings
 @using NeoHub.Services.PanelConfiguration
 @using NeoHub.Services.PanelConfiguration.Sections
-@using DSC.TLink.ITv2.MediatR
+@using DSC.TLink.ITv2.Sessions
 @using Microsoft.Extensions.Options
+@inject TimeProvider Time
 @inject IPanelStateService PanelState
 @inject IPanelConfigurationService ConfigService
 @inject IPanelConfigFileService ConfigFileService
@@ -430,7 +431,7 @@
         if (_config is null || _sessionId is null || _installerCode is null) return;
 
         var partState = _session?.Partitions.GetValueOrDefault((byte)partitionNumber);
-        var statusText = partState is not null ? $" — {FormatEnumName(partState.EffectiveStatus.ToString())}" : "";
+        var statusText = partState is not null ? $" — {FormatEnumName(partState.EffectiveStatusAt(Time.GetUtcNow().UtcDateTime).ToString())}" : "";
 
         var working = _config.Clone();
         var parameters = new DialogParameters<PartitionEditDialog>
@@ -487,11 +488,11 @@
                  Variant="@(zone.IsOpen || zone.IsFaulted || zone.IsTampered ? Variant.Filled : Variant.Outlined)">@text</MudChip>;
     };
 
-    private static RenderFragment GetPartitionStatusChip(PartitionState? part, PartitionEnable enabled) => __builder =>
+    private RenderFragment GetPartitionStatusChip(PartitionState? part, PartitionEnable enabled) => __builder =>
     {
         if (enabled != PartitionEnable.Enabled) { <MudChip T="string" Size="Size.Small" Color="Color.Default">Disabled</MudChip>; return; }
         if (part is null) { <MudChip T="string" Size="Size.Small" Color="Color.Default">Unknown</MudChip>; return; }
-        var status = part.EffectiveStatus;
+        var status = part.EffectiveStatusAt(Time.GetUtcNow().UtcDateTime);
         var color = status switch
         {
             PartitionStatus.Disarmed => Color.Success,
@@ -545,7 +546,7 @@
 
         try
         {
-            var fileName = $"panel-config-{_sessionId}-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var fileName = $"panel-config-{_sessionId}-{Time.GetLocalNow().DateTime:yyyyMMdd-HHmmss}.json";
             await ConfigFileService.SaveToServerAsync(_config, fileName);
             Snackbar.Add($"Saved to server: {fileName}", Severity.Success);
         }
@@ -563,7 +564,7 @@
         {
             var bytes = ConfigFileService.ExportToBytes(_config);
             var base64 = Convert.ToBase64String(bytes);
-            var fileName = $"panel-config-{_sessionId}-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var fileName = $"panel-config-{_sessionId}-{Time.GetLocalNow().DateTime:yyyyMMdd-HHmmss}.json";
             await JS.InvokeVoidAsync("downloadFile", fileName, base64, "application/json");
         }
         catch (Exception ex)

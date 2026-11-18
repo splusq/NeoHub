@@ -1,5 +1,5 @@
 using System.Threading.Channels;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
 using NeoHub.Domain;
 using NeoHub.Services;
 
@@ -24,16 +24,18 @@ namespace NeoHub.Api.WebSocket
         private readonly IPanelStateService _state;
         private readonly Func<IEnumerable<string>> _activeSessions;
         private readonly ILogger<ClientHub> _logger;
+        private readonly TimeProvider _time;
         private readonly CancellationTokenSource _stop = new();
         private readonly Task _run;
         private readonly Task _pump;
         private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public ClientHub(IPanelStateService state, IITv2SessionManager sessions, ILogger<ClientHub> logger)
-            : this(state, sessions.GetActiveSessions, logger) { }
+        public ClientHub(IPanelStateService state, IITv2SessionManager sessions, TimeProvider time, ILogger<ClientHub> logger)
+            : this(state, sessions.GetActiveSessions, time, logger) { }
 
-        internal ClientHub(IPanelStateService state, Func<IEnumerable<string>> activeSessions, ILogger<ClientHub> logger)
+        internal ClientHub(IPanelStateService state, Func<IEnumerable<string>> activeSessions, TimeProvider time, ILogger<ClientHub> logger)
         {
+            _time = time;
             _state = state;
             _activeSessions = activeSessions;
             _logger = logger;
@@ -43,6 +45,8 @@ namespace NeoHub.Api.WebSocket
 
         /// <summary>Completes once the hub is subscribed to the store: every change after this reaches clients.</summary>
         internal Task Ready => _ready.Task;
+
+        private DateTime Now => _time.GetUtcNow().UtcDateTime;
 
         public void Add(WebSocketClient client) => _inbox.Writer.TryWrite(new Joined(client));
         public void Remove(string clientId) => _inbox.Writer.TryWrite(new Left(clientId));
@@ -119,7 +123,7 @@ namespace NeoHub.Api.WebSocket
 
                 case FullStateRequested request:
                     if (clients.TryGetValue(request.ClientId, out var asker))
-                        PostOrDrop(asker, WebSocketMessages.FullState(_state, _activeSessions()), clients);
+                        PostOrDrop(asker, WebSocketMessages.FullState(_state, _activeSessions(), Now), clients);
                     break;
 
                 case Quiesce quiesce:
@@ -127,13 +131,13 @@ namespace NeoHub.Api.WebSocket
                     break;
 
                 case Changed changed:
-                    switch (WebSocketMessages.For(changed.Change))
+                    switch (WebSocketMessages.For(changed.Change, Now))
                     {
                         case WebSocketMessages.Broadcast.Send send:
                             Broadcast(send.Message, clients);
                             break;
                         case WebSocketMessages.Broadcast.FullState when clients.Count > 0:
-                            Broadcast(WebSocketMessages.FullState(_state, _activeSessions()), clients);
+                            Broadcast(WebSocketMessages.FullState(_state, _activeSessions(), Now), clients);
                             break;
                     }
                     break;

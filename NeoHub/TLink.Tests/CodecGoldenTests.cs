@@ -75,4 +75,16 @@ public class CodecGoldenTests
                 Assert.True(code.All(c => c == '0'), $"{record}: code not redacted");
         }
     }
+
+    /// <summary>Plans are built once, up front, so the serializer never builds or caches at runtime.</summary>
+    [Fact]
+    public void EveryRegisteredMessageType_HasAPlanBuiltUpFront()
+    {
+        var missing = DSC.TLink.ITv2.Messages.MessageFactory.GetRegisteredTypes()
+            .Select(r => r.MessageType)
+            .Where(t => !DSC.TLink.Serialization.BinarySerializer.HasPlan(t))
+            .Select(t => t.Name)
+            .ToList();
+        Assert.Empty(missing);
+    }
 }

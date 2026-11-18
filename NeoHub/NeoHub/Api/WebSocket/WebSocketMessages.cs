@@ -8,7 +8,7 @@ namespace NeoHub.Api.WebSocket
     /// <summary>Pure mapping from panel state and changes to the messages clients receive.</summary>
     public static class WebSocketMessages
     {
-        public static FullStateMessage FullState(IPanelStateService state, IEnumerable<string> activeSessions) => new()
+        public static FullStateMessage FullState(IPanelStateService state, IEnumerable<string> activeSessions, DateTime nowUtc) => new()
         {
             Sessions = activeSessions
                 .Where(id => !string.IsNullOrWhiteSpace(id))
@@ -22,7 +22,7 @@ namespace NeoHub.Api.WebSocket
                         {
                             PartitionNumber = kv.Key,
                             Name = kv.Value.DisplayName,
-                            Status = kv.Value.EffectiveStatus
+                            Status = kv.Value.EffectiveStatusAt(nowUtc)
                         })
                         .ToList(),
                     Zones = state.GetZones(id)
@@ -42,13 +42,13 @@ namespace NeoHub.Api.WebSocket
         };
 
         /// <summary>What a change means for clients.</summary>
-        public static Broadcast For(PanelChange change) => change switch
+        public static Broadcast For(PanelChange change, DateTime nowUtc) => change switch
         {
             PartitionChanged p when !string.IsNullOrWhiteSpace(p.SessionId) => new Broadcast.Send(new PartitionUpdateMessage
             {
                 SessionId = p.SessionId,
                 PartitionNumber = p.Partition.PartitionNumber,
-                Status = p.Partition.EffectiveStatus
+                Status = p.Partition.EffectiveStatusAt(nowUtc)
             }),
             ZoneChanged z when !string.IsNullOrWhiteSpace(z.SessionId) => new Broadcast.Send(new ZoneUpdateMessage
             {

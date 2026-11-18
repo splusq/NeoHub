@@ -1,23 +1,25 @@
 using DSC.TLink.ITv2.Enumerations;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
 using DSC.TLink.ITv2.Messages;
-using MediatR;
 
 namespace NeoHub.Services.PanelConfiguration;
 
 public class PanelConfigurationService : IPanelConfigurationService
 {
-    private readonly IMediator _mediator;
+    private readonly IPanelSender _mediator;
+    private readonly TimeProvider _time;
     private readonly IPanelStateService _panelState;
     private readonly ILogger<PanelConfigurationService> _logger;
     private readonly NeoHub.Domain.IPanelOperations _operations;
 
     public PanelConfigurationService(
-        IMediator mediator,
+        IPanelSender mediator,
         IPanelStateService panelState,
         ILogger<PanelConfigurationService> logger,
-        NeoHub.Domain.IPanelOperations operations)
+        NeoHub.Domain.IPanelOperations operations,
+        TimeProvider? time = null)
     {
+        _time = time ?? TimeProvider.System;
         _operations = operations;
         _mediator = mediator;
         _panelState = panelState;
@@ -70,7 +72,7 @@ public class PanelConfigurationService : IPanelConfigurationService
             }
         }
 
-        config.LastReadAt = DateTime.UtcNow;
+        config.LastReadAt = _time.GetUtcNow().UtcDateTime;
 
         await _panelState.DispatchAsync(new NeoHub.Domain.ConfigurationReplaced(sessionId, config));
         _logger.LogInformation("Panel configuration read complete");

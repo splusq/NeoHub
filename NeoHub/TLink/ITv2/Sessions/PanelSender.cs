@@ -1,36 +1,33 @@
 using DSC.TLink.ITv2.Enumerations;
 using DSC.TLink.ITv2.Messages;
-using MediatR;
 using Microsoft.Extensions.Logging;
 
-namespace DSC.TLink.ITv2.MediatR
+namespace DSC.TLink.ITv2.Sessions
 {
-    /// <summary>
-    /// Unified mediator that handles both outbound commands (from Blazor UI) 
-    /// and publishes inbound notifications (from panel).
-    /// Registered as singleton - uses SessionManager for routing.
-    /// </summary>
-    internal class SessionMediator : IRequestHandler<SessionCommand, SessionResponse>
+    /// <summary>Sends a message to a panel and waits for its reply.</summary>
+    public interface IPanelSender
     {
-        private readonly IMediator _mediator;
-        private readonly IITv2SessionManager _sessionManager;
-        private readonly ILogger<SessionMediator> _logger;
+        /// <summary>
+        /// Sends <see cref="SessionCommand.MessageData"/> to the panel's live connection. Never throws
+        /// for panel or transport failures (they come back as an unsuccessful response); it throws
+        /// <see cref="OperationCanceledException"/> only when <paramref name="cancellationToken"/> is cancelled.
+        /// </summary>
+        Task<SessionResponse> Send(SessionCommand command, CancellationToken cancellationToken = default);
+    }
 
-        public SessionMediator(
-            IMediator mediator,
-            IITv2SessionManager sessionManager,
-            ILogger<SessionMediator> logger)
+    /// <summary>Routes a command to the panel's current connection.</summary>
+    internal sealed class PanelSender : IPanelSender
+    {
+        private readonly IITv2SessionManager _sessionManager;
+        private readonly ILogger<PanelSender> _logger;
+
+        public PanelSender(IITv2SessionManager sessionManager, ILogger<PanelSender> logger)
         {
-            _mediator = mediator;
             _sessionManager = sessionManager;
             _logger = logger;
         }
 
-        #region Command Handling (Outbound from Blazor UI)
-
-        public async Task<SessionResponse> Handle(
-            SessionCommand request,
-            CancellationToken cancellationToken)
+        public async Task<SessionResponse> Send(SessionCommand request, CancellationToken cancellationToken = default)
         {
             var session = _sessionManager.GetSession(request.SessionID);
             if (session == null)
@@ -70,25 +67,17 @@ namespace DSC.TLink.ITv2.MediatR
                     };
                 }
 
-                return new SessionResponse
-                {
-                    Success = true,
-                    MessageData = result.Value
-                };
+                return new SessionResponse { Success = true, MessageData = result.Value };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error handling command");
-                return new SessionResponse
-                {
-                    Success = false,
-                    ErrorMessage = ex.Message
-                };
+                return new SessionResponse { Success = false, ErrorMessage = ex.Message };
             }
         }
-
-        #endregion
-
-
     }
 }

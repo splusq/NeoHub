@@ -15,7 +15,7 @@ namespace NeoHub.Services;
 public record PanelUserListFile
 {
     public string FormatVersion { get; init; } = "1.0";
-    public DateTime ExportedAtUtc { get; init; } = DateTime.UtcNow;
+    public DateTime ExportedAtUtc { get; init; }
 
     /// <summary>Informational: the panel's reported <c>MaxUsers</c> at export time.</summary>
     public int MaxUsers { get; init; }
@@ -99,8 +99,11 @@ public class PanelUserListFileService : IPanelUserListFileService
     private readonly string _dir;
     private readonly ILogger<PanelUserListFileService> _logger;
 
-    public PanelUserListFileService(ISettingsPersistenceService persistence, ILogger<PanelUserListFileService> logger)
+    private readonly TimeProvider _time;
+
+    public PanelUserListFileService(ISettingsPersistenceService persistence, ILogger<PanelUserListFileService> logger, TimeProvider? time = null)
     {
+        _time = time ?? TimeProvider.System;
         _dir = Path.Combine(persistence.PersistPath, "users");
         Directory.CreateDirectory(_dir);
         _logger = logger;
@@ -112,7 +115,7 @@ public class PanelUserListFileService : IPanelUserListFileService
     {
         var file = new PanelUserListFile
         {
-            ExportedAtUtc = userList.LastReadAt ?? DateTime.UtcNow,
+            ExportedAtUtc = userList.LastReadAt ?? _time.GetUtcNow().UtcDateTime,
             MaxUsers = maxUsers,
             MaxPartitions = maxPartitions,
             Users = userList.Users.Values
@@ -231,7 +234,7 @@ public class PanelUserListFileService : IPanelUserListFileService
         sb.Append($"{maxUsers} user slots &middot; {maxPartitions} partitions");
         if (userList.LastReadAt is not null)
             sb.Append($" &middot; Read: {userList.LastReadAt.Value.ToLocalTime():yyyy-MM-dd HH:mm:ss}");
-        sb.Append($" &middot; Printed: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.Append($" &middot; Printed: {_time.GetLocalNow():yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine("</div>");
 
         if (revealCodes)

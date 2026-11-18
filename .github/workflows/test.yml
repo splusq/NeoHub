@@ -24,6 +24,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The banned-API analyzer (BannedSymbols.txt) can't see the lock statement; this can.
+      - name: No locks in product code
+        shell: bash
+        run: |
+          if grep -rnE '\block\s*\(|MethodImplOptions\.Synchronized' --include='*.cs' --include='*.razor' NeoHub/TLink NeoHub/NeoHub \
+               | grep -v '/obj/\|/bin/'; then
+            echo "::error::lock statements are not allowed; use a Channel<T> actor or Snapshot<T> (docs/Architecture.md)"
+            exit 1
+          fi
+
       - name: Build
         run: |
           dotnet build NeoHub/TLink.Tests/DSC.TLink.Tests.csproj -c Release

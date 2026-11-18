@@ -4,8 +4,9 @@
 @using NeoHub.Services.Settings
 @using NeoHub.Services.Diagnostics
 @using DSC.TLink.ITv2
-@using DSC.TLink.ITv2.MediatR
+@using DSC.TLink.ITv2.Sessions
 @using Microsoft.Extensions.Options
+@inject TimeProvider Time
 @inject IOptionsMonitor<PanelConnectionsSettings> ConnectionSettings
 @inject IITv2SessionManager SessionManager
 @inject IPanelStateService PanelState
@@ -245,7 +246,7 @@
     private string? expandedSettings;
     private string? expandedLogs;
     private bool saving;
-    private Timer? _refreshTimer;
+    private ITimer? _refreshTimer;
     private bool _disposed;
 
     protected override void OnInitialized()
@@ -301,7 +302,7 @@
     private void UpdateRefreshTimer()
     {
         if (activeSessions.Any())
-            _refreshTimer ??= new Timer(_ => InvokeAsync(() =>
+            _refreshTimer ??= Time.CreateTimer(_ => InvokeAsync(() =>
             {
                 if (_disposed) return;
                 try { StateHasChanged(); }
@@ -337,14 +338,21 @@
         if (activeSessions.Contains(conn.SessionId))
             await SessionManager.DisconnectSessionAsync(conn.SessionId);
 
-        ConnectionSettings.CurrentValue.Connections.Remove(conn);
         expandedSettings = null;
         expandedLogs = null;
 
         try
         {
-            await PersistenceService.SaveSettingsAsync(
-                typeof(PanelConnectionsSettings), ConnectionSettings.CurrentValue);
+            await PersistenceService.UpdateAsync<PanelConnectionsSettings>(settings =>
+            {
+                var remaining = settings.Connections
+                    .Where(c => !ReferenceEquals(c, conn)
+                             && (string.IsNullOrEmpty(conn.SessionId) || !string.Equals(c.SessionId, conn.SessionId, StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
+                if (remaining.Count == settings.Connections.Count) return false;
+                settings.Connections = remaining;
+                return true;
+            });
             Snackbar.Add($"Connection {(string.IsNullOrEmpty(conn.SessionId) ? "(new)" : conn.SessionId)} deleted", Severity.Success);
         }
         catch (Exception ex)
@@ -416,9 +424,9 @@
             if (session.Zones.Any())
                 parts.Add($"{session.Zones.Count} zones");
 
-            parts.Add($"Up {FormatDuration(DateTime.UtcNow - session.ConnectedAt)}");
+            parts.Add($"Up {FormatDuration(Time.GetUtcNow().UtcDateTime - session.ConnectedAt)}");
 
-            var lastActivity = DateTime.UtcNow - session.LastMessageAt;
+            var lastActivity = Time.GetUtcNow().UtcDateTime - session.LastMessageAt;
             parts.Add(lastActivity.TotalSeconds < 5 ? "Active now" : $"Last activity {FormatDuration(lastActivity)} ago");
         }
         else if (!conn.IsComplete)
