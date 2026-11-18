@@ -9,7 +9,6 @@
 @inject IPanelUserListFileService UserListFiles
 @inject IPanelStateService PanelState
 @inject IITv2SessionManager SessionManager
-@inject ISessionMonitor SessionMonitor
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
 @inject NavigationManager Navigation
@@ -292,8 +291,14 @@
     protected override void OnInitialized()
     {
         RefreshSession();
-        SessionMonitor.SessionsChanged += OnSessionsChanged;
-        PanelState.SessionStateChanged += OnSessionStateChanged;
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            switch (c)
+            {
+                case Domain.SessionsChanged or Domain.SessionRemoved or Domain.Resynchronize: OnSessionsChanged(); break;
+                case Domain.SessionChanged changed: OnSessionStateChanged(changed.SessionId); break;
+            }
+        });
 
         _renderTimer = new Timer(_ => InvokeAsync(() =>
         {
@@ -347,9 +352,11 @@
         _renderDirty = true;
     }
 
-    private void OnSessionStateChanged(object? sender, SessionStateChangedEventArgs e)
+    private Domain.PanelChangeFeed? _feed;
+
+    private void OnSessionStateChanged(string sessionId)
     {
-        if (_sessionId == null || !string.Equals(_sessionId, e.SessionId, StringComparison.OrdinalIgnoreCase))
+        if (_sessionId == null || !string.Equals(_sessionId, sessionId, StringComparison.OrdinalIgnoreCase))
             return;
 
         _renderDirty = true;
@@ -709,7 +716,6 @@
     {
         _disposed = true;
         _renderTimer?.Dispose();
-        SessionMonitor.SessionsChanged -= OnSessionsChanged;
-        PanelState.SessionStateChanged -= OnSessionStateChanged;
+        _feed?.Dispose();
     }
 }

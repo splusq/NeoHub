@@ -68,34 +68,139 @@ public class PanelStoreTests : IAsyncLifetime
         Assert.True(_store.GetZone(Panel, 9)!.IsOpen);
     }
 
-    [Fact]
-    public async Task ZoneChanges_AreAnnouncedInOrder()
+    private static List<PanelChange> Drain(PanelSubscription subscription)
     {
-        var seen = new List<string>();
-        _store.ZoneStateChanged += (_, e) => seen.Add($"{e.Zone.ZoneNumber}:{e.Zone.IsOpen}");
+        var items = new List<PanelChange>();
+        while (subscription.Changes.TryRead(out var change))
+            items.Add(change);
+        return items;
+    }
 
+    [Fact]
+    public async Task Subscription_StartsWithResynchronize_ThenEveryChangeInOrder()
+    {
+        using var subscription = _store.Subscribe();
         Sink.Started(Panel, A, T);
         for (int i = 0; i < 50; i++)
             Sink.Accept(new PanelMessage(Panel, A, Zone(1, i % 2 == 0), T.AddSeconds(i)));
         await Barrier();
 
-        Assert.Equal(Enumerable.Range(0, 50).Select(i => $"1:{i % 2 == 0}"), seen);
+        var changes = Drain(subscription);
+        Assert.IsType<Resynchronize>(changes[0]);
+        Assert.Equal(
+            Enumerable.Range(0, 50).Select(i => $"1:{i % 2 == 0}"),
+            changes.OfType<ZoneChanged>().Select(z => $"{z.Zone.ZoneNumber}:{z.Zone.IsOpen}"));
     }
 
     [Fact]
-    public async Task ThrowingSubscriber_DoesNotStopOthersOrTheStore()
+    public async Task Subscription_ResynchronizeMarksTheSnapshot_NothingFallsBetween()
     {
-        var calls = 0;
-        _store.ZoneStateChanged += (_, _) => throw new InvalidOperationException("subscriber bug");
-        _store.ZoneStateChanged += (_, _) => calls++;
+        // Changes before subscribing are in the snapshot; changes after it arrive on the stream.
+        Sink.Started(Panel, A, T);
+        Sink.Accept(new PanelMessage(Panel, A, Zone(1, true), T));
+        using var subscription = _store.Subscribe();
+        Sink.Accept(new PanelMessage(Panel, A, Zone(2, true), T));
+        await Barrier();
+
+        var changes = Drain(subscription);
+        Assert.IsType<Resynchronize>(changes[0]);
+        Assert.Equal([2], changes.OfType<ZoneChanged>().Select(z => (int)z.Zone.ZoneNumber));
+    }
+
+    [Fact]
+    public async Task SlowSubscriber_IsToldToResynchronize_OthersAreUnaffected()
+    {
+        using var slow = _store.Subscribe();
+        using var fast = _store.Subscribe();
+        Sink.Started(Panel, A, T);
+        await Barrier();
+        var first = PanelStore.SubscriberCapacity / 2 + 10;
+        for (int i = 0; i < first; i++)
+            Sink.Accept(new PanelMessage(Panel, A, Zone(1, i % 2 == 0), T));
+        await Barrier();
+        var fastSeen = Drain(fast).Count;
+        for (int i = 0; i < first; i++)
+            Sink.Accept(new PanelMessage(Panel, A, Zone(2, i % 2 == 0), T));
+        await Barrier();
+        fastSeen += Drain(fast).Count;
+
+        // The slow one gets what fit, then the stream ends with the overflow.
+        Assert.Equal(PanelStore.SubscriberCapacity, Drain(slow).Count);
+        await Assert.ThrowsAsync<SubscriberOverflowException>(() => slow.Changes.Completion.WaitAsync(Guard));
+        // The fast one saw everything and is still subscribed.
+        Assert.False(fast.Changes.Completion.IsCompleted);
+        Assert.True(fastSeen > PanelStore.SubscriberCapacity);
+        // And the store kept going.
+        Assert.Equal(2, _store.GetZones(Panel).Count);
+    }
+
+    [Fact]
+    public async Task DisposedSubscription_StopsReceiving()
+    {
+        var subscription = _store.Subscribe();
+        subscription.Dispose();
+        Sink.Started(Panel, A, T);
+        await Barrier();
+
+        // Only the opening marker was delivered; then the stream ended (a reader's Completion
+        // finishes once the remaining items are read).
+        Assert.All(Drain(subscription), c => Assert.IsType<Resynchronize>(c));
+        await subscription.Changes.Completion.WaitAsync(Guard);
+    }
+
+    [Fact]
+    public async Task ChangeFeed_ThrowingCallback_DoesNotStopTheFeedOrTheStore()
+    {
+        var seen = new List<byte>();
+        var sawTwo = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var subscribed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var feed = PanelChangeFeed.Start(_store, c =>
+        {
+            if (c is Resynchronize) subscribed.TrySetResult();
+            if (c is not ZoneChanged z) return;
+            if (z.Zone.ZoneNumber == 1) throw new InvalidOperationException("subscriber bug");
+            seen.Add(z.Zone.ZoneNumber);
+            if (z.Zone.ZoneNumber == 2) sawTwo.TrySetResult();
+        });
+        // The feed subscribes in the background; changes before that are only in the snapshot.
+        await subscribed.Task.WaitAsync(Guard);
 
         Sink.Started(Panel, A, T);
         Sink.Accept(new PanelMessage(Panel, A, Zone(1, true), T));
         Sink.Accept(new PanelMessage(Panel, A, Zone(2, true), T));
-        await Barrier();
+        await sawTwo.Task.WaitAsync(Guard);
 
-        Assert.Equal(2, calls);
+        Assert.Equal([2], seen);
         Assert.Equal(2, _store.GetZones(Panel).Count);
+    }
+
+    [Fact]
+    public async Task ChangeFeed_FallingBehind_ResubscribesAndResynchronizes()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resyncs = 0;
+        var resynced = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var subscribed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var feed = PanelChangeFeed.Start(_store, c =>
+        {
+            if (c is not Resynchronize) return;
+            if (++resyncs == 1)
+            {
+                subscribed.TrySetResult();
+                gate.Task.Wait();          // the page is busy: changes pile up behind it
+            }
+            else resynced.TrySetResult();
+        });
+        await subscribed.Task.WaitAsync(Guard);
+
+        Sink.Started(Panel, A, T);
+        for (int i = 0; i < PanelStore.SubscriberCapacity + 10; i++)
+            Sink.Accept(new PanelMessage(Panel, A, Zone(1, i % 2 == 0), T));
+        await Barrier();
+        gate.SetResult();
+
+        await resynced.Task.WaitAsync(Guard);
+        Assert.Equal(2, resyncs);
     }
 
     [Fact]

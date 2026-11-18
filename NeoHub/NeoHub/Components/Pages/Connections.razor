@@ -9,7 +9,6 @@
 @inject IOptionsMonitor<PanelConnectionsSettings> ConnectionSettings
 @inject IITv2SessionManager SessionManager
 @inject IPanelStateService PanelState
-@inject ISessionMonitor SessionMonitor
 @inject IDiagnosticsLogService LogService
 @inject ISettingsPersistenceService PersistenceService
 @inject NavigationManager Navigation
@@ -254,8 +253,11 @@
         RefreshData();
         if (!string.IsNullOrEmpty(ExpandSessionId))
             expandedSettings = ExpandSessionId;
-        SessionMonitor.SessionsChanged += OnSessionsChanged;
-        PanelState.SessionStateChanged += OnStateChanged;
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            if (c is Domain.SessionsChanged or Domain.SessionRemoved or Domain.Resynchronize) OnSessionsChanged();
+            if (c is Domain.SessionChanged or Domain.SessionRemoved or Domain.Resynchronize) OnStateChanged();
+        });
         UpdateRefreshTimer();
     }
 
@@ -280,7 +282,9 @@
         });
     }
 
-    private void OnStateChanged(object? sender, EventArgs e)
+    private Domain.PanelChangeFeed? _feed;
+
+    private void OnStateChanged()
     {
         InvokeAsync(() =>
         {
@@ -455,7 +459,6 @@
     {
         _disposed = true;
         _refreshTimer?.Dispose();
-        SessionMonitor.SessionsChanged -= OnSessionsChanged;
-        PanelState.SessionStateChanged -= OnStateChanged;
+        _feed?.Dispose();
     }
 }

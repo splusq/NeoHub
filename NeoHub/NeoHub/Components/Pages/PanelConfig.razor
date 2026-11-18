@@ -10,7 +10,6 @@
 @inject IPanelConfigurationService ConfigService
 @inject IPanelConfigFileService ConfigFileService
 @inject IITv2SessionManager SessionManager
-@inject ISessionMonitor SessionMonitor
 @inject IJSRuntime JS
 @inject IOptionsMonitor<PanelConnectionsSettings> ConnectionSettings
 @inject IPanelAccessCodeService AccessCodes
@@ -271,8 +270,11 @@
     protected override void OnInitialized()
     {
         RefreshSessions();
-        SessionMonitor.SessionsChanged += OnSessionsChanged;
-        PanelState.SessionStateChanged += OnStateChanged;
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            if (c is Domain.SessionsChanged or Domain.SessionRemoved or Domain.Resynchronize) OnSessionsChanged();
+            if (c is Domain.SessionChanged or Domain.SessionRemoved or Domain.Resynchronize) OnStateChanged();
+        });
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -321,7 +323,9 @@
         });
     }
 
-    private void OnStateChanged(object? sender, EventArgs e)
+    private Domain.PanelChangeFeed? _feed;
+
+    private void OnStateChanged()
     {
         InvokeAsync(() =>
         {
@@ -532,8 +536,7 @@
     public void Dispose()
     {
         _disposed = true;
-        SessionMonitor.SessionsChanged -= OnSessionsChanged;
-        PanelState.SessionStateChanged -= OnStateChanged;
+        _feed?.Dispose();
     }
 
     private async Task SaveToServerAsync()

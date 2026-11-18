@@ -9,7 +9,6 @@
 @inject IPanelStateService PanelState
 @inject IPanelCommandService CommandService
 @inject IITv2SessionManager SessionManager
-@inject ISessionMonitor SessionMonitor
 @inject NavigationManager Navigation
 @inject ISnackbar Snackbar
 @inject IOptionsMonitor<PanelConnectionsSettings> ConnectionSettings
@@ -283,10 +282,11 @@
 	protected override void OnInitialized()
 	{
 		RefreshSessions();
-		SessionMonitor.SessionsChanged += OnSessionsChanged;
-		PanelState.SessionStateChanged += OnStateChanged;
-		PanelState.PartitionStateChanged += OnStateChanged;
-		PanelState.ZoneStateChanged += OnStateChanged;
+		_feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+		{
+			if (c is Domain.SessionsChanged) OnSessionsChanged();
+			else OnStateChanged();
+		});
 
 		_clockTimer = new Timer(_ => InvokeAsync(() =>
 		{
@@ -305,7 +305,9 @@
 		_renderDirty = true;
 	}
 
-	private void OnStateChanged(object? sender, EventArgs e)
+	private Domain.PanelChangeFeed? _feed;
+
+	private void OnStateChanged()
 	{
 		_renderDirty = true;
 	}
@@ -479,10 +481,7 @@
 	{
 		_disposed = true;
 		_clockTimer?.Dispose();
-		SessionMonitor.SessionsChanged -= OnSessionsChanged;
-		PanelState.SessionStateChanged -= OnStateChanged;
-		PanelState.PartitionStateChanged -= OnStateChanged;
-		PanelState.ZoneStateChanged -= OnStateChanged;
+		_feed?.Dispose();
 	}
 
 	private bool HasDefaultAccessCode(string? sessionId) =>

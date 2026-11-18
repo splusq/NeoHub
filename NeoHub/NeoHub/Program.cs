@@ -89,6 +89,7 @@ namespace NeoHub
             builder.Services.AddSingleton<IConnectionSettingsProvider, ConnectionSettingsProvider>();
 
             // WebSocket API
+            builder.Services.AddSingleton<ClientHub>();
             builder.Services.AddSingleton<PanelWebSocketHandler>();
 
             // TLink infrastructure
