@@ -26,6 +26,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="DSC.TLink.Tests" />
+    <InternalsVisibleTo Include="CaptureTool" />
   </ItemGroup>
 
   <ItemGroup>
