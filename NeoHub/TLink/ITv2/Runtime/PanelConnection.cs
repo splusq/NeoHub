@@ -33,7 +33,7 @@ internal sealed class PanelConnection : IITv2Session
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
     private readonly Channel<Envelope> _inbox = Channel.CreateUnbounded<Envelope>(new UnboundedChannelOptions { SingleReader = true });
-    private readonly Channel<IMessageData> _notifications = Channel.CreateUnbounded<IMessageData>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+    private readonly Channel<PanelMessage> _notifications = Channel.CreateUnbounded<PanelMessage>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
     private readonly TaskCompletionSource<string> _established = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Task _run;
@@ -70,6 +70,9 @@ internal sealed class PanelConnection : IITv2Session
 
     public string SessionId => _established.Task.IsCompletedSuccessfully ? _established.Task.Result : string.Empty;
 
+    /// <summary>Identifies this connection, as opposed to the panel (several connections can share a SessionId over time).</summary>
+    public Guid ConnectionId { get; } = Guid.NewGuid();
+
     /// <summary>Cancelled when this connection ends, for any reason.</summary>
     public CancellationToken Lifetime { get; }
 
@@ -89,8 +92,8 @@ internal sealed class PanelConnection : IITv2Session
         return result;
     }
 
-    /// <summary>Notifications from the panel, in arrival order. Ends when the connection closes.</summary>
-    public IAsyncEnumerable<IMessageData> GetNotificationsAsync(CancellationToken ct = default)
+    /// <summary>Notifications from the panel, in arrival order, stamped with when they arrived. Ends when the connection closes.</summary>
+    public IAsyncEnumerable<PanelMessage> GetNotificationsAsync(CancellationToken ct = default)
         => _notifications.Reader.ReadAllAsync(ct);
 
     /// <summary>
@@ -154,10 +157,11 @@ internal sealed class PanelConnection : IITv2Session
                     work.Enqueue(input);
                 while (work.Count > 0)
                 {
-                    var transition = Connection.Step(state, work.Dequeue());
+                    var step = work.Dequeue();
+                    var transition = Connection.Step(state, step);
                     state = transition.State;
                     foreach (var effect in transition.Effects)
-                        await PerformAsync(effect, work);
+                        await PerformAsync(effect, step.Now, work);
                 }
 
                 if (state.Phase == Phase.Closed)
@@ -216,7 +220,7 @@ internal sealed class PanelConnection : IITv2Session
             return new SendRequested(now, id, s.Message);
         }
 
-        async Task PerformAsync(ConnectionEffect effect, Queue<ConnectionInput> work)
+        async Task PerformAsync(ConnectionEffect effect, DateTimeOffset inputTime, Queue<ConnectionInput> work)
         {
             switch (effect)
             {
@@ -247,7 +251,8 @@ internal sealed class PanelConnection : IITv2Session
                     break;
 
                 case Publish p:
-                    _notifications.Writer.TryWrite(p.Message);
+                    // Stamped with the time of the input that produced it: the frame's arrival.
+                    _notifications.Writer.TryWrite(new PanelMessage(SessionId, ConnectionId, p.Message, inputTime));
                     break;
 
                 case SessionEstablished e:

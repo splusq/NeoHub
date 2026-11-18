@@ -1,23 +1,27 @@
 namespace NeoHub.Services.Models
 {
     /// <summary>
-    /// State of a single partition (no longer contains zones).
+    /// State of a single partition. Immutable: changed only by <see cref="Domain.PanelReducer"/>,
+    /// which returns a new instance.
     /// </summary>
-    public class PartitionState
+    public sealed record PartitionState
     {
-        public byte PartitionNumber { get; set; }
-        public string? Name { get; set; }
+        public byte PartitionNumber { get; init; }
+        public string? Name { get; init; }
         public string DisplayName => Name ?? $"Partition {PartitionNumber}";
-        public bool IsReady { get; set; }
-        public PartitionStatus Status { get; set; } = PartitionStatus.Unknown;
-        public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
+        public bool IsReady { get; init; }
+        public PartitionStatus Status { get; init; } = PartitionStatus.Unknown;
+        public DateTime LastUpdated { get; init; }
+
+        /// <summary>Store version of the last live change (orders pulled status against live events).</summary>
+        public long Version { get; init; }
 
         // Exit delay tracking
-        public bool ExitDelayActive { get; set; }
-        public DateTime? ExitDelayStartedAt { get; set; }
-        public int ExitDelayDurationSeconds { get; set; }
-        public bool ExitDelayAudible { get; set; }
-        public bool ExitDelayUrgent { get; set; }
+        public bool ExitDelayActive { get; init; }
+        public DateTime? ExitDelayStartedAt { get; init; }
+        public int ExitDelayDurationSeconds { get; init; }
+        public bool ExitDelayAudible { get; init; }
+        public bool ExitDelayUrgent { get; init; }
 
         /// <summary>
         /// Whether the partition is in any armed state (including arming during exit delay).
@@ -37,7 +41,8 @@ namespace NeoHub.Services.Models
                 : Status;
 
         /// <summary>
-        /// Returns the remaining exit delay time, or null if no delay is active.
+        /// Remaining exit delay for display, or null if no delay is active. (Reads the clock: a
+        /// presentation helper, not state.)
         /// </summary>
         public TimeSpan? ExitDelayRemaining
         {
@@ -45,7 +50,6 @@ namespace NeoHub.Services.Models
             {
                 if (!ExitDelayActive || !ExitDelayStartedAt.HasValue)
                     return null;
-
                 var elapsed = DateTime.UtcNow - ExitDelayStartedAt.Value;
                 var remaining = TimeSpan.FromSeconds(ExitDelayDurationSeconds) - elapsed;
                 return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;

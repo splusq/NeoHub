@@ -113,7 +113,7 @@ internal sealed class PanelRegistry : IITv2SessionManager, IAsyncDisposable
                         {
                             _logger.LogInformation("Session registered. Active sessions: {Count}", current.Count);
                         }
-                        _lifecycle.Writer.TryWrite(new SessionConnectedNotification(id, connection.Lifetime));
+                        _lifecycle.Writer.TryWrite(new SessionConnectedNotification(id, connection.Lifetime, connection.ConnectionId));
                         break;
                     }
 

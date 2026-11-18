@@ -74,7 +74,9 @@ namespace NeoHub
                 typeof(StartupExtensions).Assembly));
 
             // Application services
-            builder.Services.AddSingleton<IPanelStateService, PanelStateService>();
+            builder.Services.AddSingleton<NeoHub.Domain.PanelStore>();
+            builder.Services.AddSingleton<IPanelStateService>(sp => sp.GetRequiredService<NeoHub.Domain.PanelStore>());
+            builder.Services.AddSingleton<DSC.TLink.ITv2.IPanelMessageSink>(sp => sp.GetRequiredService<NeoHub.Domain.PanelStore>());
             builder.Services.AddSingleton<IPanelCommandService, PanelCommandService>();
             builder.Services.AddSingleton<IPanelUserService, PanelUserService>();
             builder.Services.AddSingleton<IPanelUserListFileService, PanelUserListFileService>();

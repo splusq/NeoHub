@@ -56,13 +56,12 @@ namespace NeoHub.Services
 
             _logger.LogInformation("Reading panel users for session {SessionId}, max users: {MaxUsers}", sessionId, session.MaxUsers);
 
-            _panelState.UpdateSession(sessionId, s =>
-            {
+            { var s = _panelState.GetSession(sessionId); if (s is not null) {
                 s.UserList.IsReading = true;
                 s.UserList.ReadCurrent = 0;
                 s.UserList.ReadTotal = s.MaxUsers;
                 s.UserList.ReadProgress = null;
-            });
+            } _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
 
             try
             {
@@ -89,13 +88,12 @@ namespace NeoHub.Services
             }
             finally
             {
-                _panelState.UpdateSession(sessionId, s =>
-                {
+                { var s = _panelState.GetSession(sessionId); if (s is not null) {
                     s.UserList.IsReading = false;
                     s.UserList.ReadProgress = null;
                     s.UserList.ReadCurrent = 0;
                     s.UserList.ReadTotal = 0;
-                });
+                } _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
             }
         }
 
@@ -216,7 +214,7 @@ namespace NeoHub.Services
                         await RefreshSingleUserAsync(sessionId, user, innerCt);
 
                     user.LastUpdated = DateTime.UtcNow;
-                    _panelState.UpdateSession(sessionId, s => s.UserList.Users[idx] = user);
+                    { var s = _panelState.GetSession(sessionId); if (s is not null) s.UserList.Users[idx] = user; _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
 
                     return new PanelUserWriteResult(true)
                     {
@@ -337,7 +335,7 @@ namespace NeoHub.Services
 
         private void UpdateProgress(string sessionId, string message)
         {
-            _panelState.UpdateSession(sessionId, s => s.UserList.ReadProgress = message);
+            { var s = _panelState.GetSession(sessionId); if (s is not null) s.UserList.ReadProgress = message; _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
         }
 
         // ── User labels (via NotificationLabelText) ─────────────────────
@@ -480,19 +478,17 @@ namespace NeoHub.Services
                 assembled[i] = state;
             }
 
-            _panelState.UpdateSession(sessionId, s =>
-            {
+            { var s = _panelState.GetSession(sessionId); if (s is not null) {
                 foreach (var (idx, state) in assembled)
                     s.UserList.Users[idx] = state;
-            });
+            } _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
 
             sw.Stop();
-            _panelState.UpdateSession(sessionId, s =>
-            {
+            { var s = _panelState.GetSession(sessionId); if (s is not null) {
                 s.UserList.ReadCurrent = maxUsers;
                 s.UserList.ReadProgress = "Finishing…";
                 s.UserList.LastReadAt = DateTime.UtcNow;
-            });
+            } _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
 
             _logger.LogInformation("Read {Total} users in {Elapsed}ms", maxUsers, sw.ElapsedMilliseconds);
 

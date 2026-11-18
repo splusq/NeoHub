@@ -202,7 +202,7 @@ namespace NeoHub.Api.WebSocket
                                 DeviceClass = DetermineDeviceClass(kvp.Value),
                                 Open = kvp.Value.IsOpen,
                                 Bypassed = kvp.Value.IsBypassed,
-                                Partitions = kvp.Value.Partitions
+                                Partitions = kvp.Value.Partitions.ToList()
                             })
                             .ToList()
                     };

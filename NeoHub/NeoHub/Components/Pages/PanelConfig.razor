@@ -617,7 +617,7 @@
         {
             // No current config to diff against — just apply directly
             if (_sessionId is not null)
-                PanelState.UpdateSession(_sessionId, s => s.Configuration = incoming);
+                PanelState.Dispatch(new NeoHub.Domain.ConfigurationReplaced(_sessionId, incoming));
             _session = _sessionId is not null ? PanelState.GetSession(_sessionId) : null;
             _config = _session?.Configuration;
             Snackbar.Add($"Loaded: {sourceName}", Severity.Success);
@@ -655,7 +655,7 @@
         if (!wasWritten)
         {
             // Preview only — swap in-memory config without writing to panel
-            PanelState.UpdateSession(_sessionId, s => s.Configuration = incoming);
+            PanelState.Dispatch(new NeoHub.Domain.ConfigurationReplaced(_sessionId, incoming));
         }
 
         _session = PanelState.GetSession(_sessionId);

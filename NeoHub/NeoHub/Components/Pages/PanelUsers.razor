@@ -585,7 +585,7 @@
         {
             var bytes = await UserListFiles.LoadBytesFromServerAsync(fileName);
             var file = UserListFiles.ImportInto(bytes, _session.UserList);
-            PanelState.UpdateSession(_sessionId!, _ => { });  // notify subscribers of list change
+            PanelState.Dispatch(new NeoHub.Domain.UserListChanged(_sessionId!));  // notify subscribers of list change
             Snackbar.Add($"Loaded {file.Users.Count} users from {fileName}", Severity.Success);
         }
         catch (Exception ex)
@@ -609,7 +609,7 @@
             using var ms = new MemoryStream();
             await browserFile.OpenReadStream(maxAllowedSize: 1_048_576).CopyToAsync(ms);
             var file = UserListFiles.ImportInto(ms.ToArray(), _session.UserList);
-            PanelState.UpdateSession(_sessionId!, _ => { });
+            PanelState.Dispatch(new NeoHub.Domain.UserListChanged(_sessionId!));
             Snackbar.Add($"Loaded {file.Users.Count} users from {browserFile.Name}", Severity.Success);
         }
         catch (Exception ex)

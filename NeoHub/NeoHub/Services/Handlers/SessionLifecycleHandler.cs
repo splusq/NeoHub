@@ -39,7 +39,7 @@ namespace NeoHub.Services.Handlers
         public Task Handle(SessionDisconnectedNotification notification, CancellationToken cancellationToken)
         {
             _logger.LogInformation("Session disconnected");
-            _panelState.RemoveSession(notification.SessionId);
+            // State is removed by the connection's own ordered stream (SessionEnded).
             _monitor.NotifyChanged();
             return Task.CompletedTask;
         }

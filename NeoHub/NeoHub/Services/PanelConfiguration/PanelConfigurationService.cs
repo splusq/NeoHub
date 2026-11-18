@@ -77,7 +77,7 @@ public class PanelConfigurationService : IPanelConfigurationService
 
         config.LastReadAt = DateTime.UtcNow;
 
-        _panelState.UpdateSession(sessionId, s => s.Configuration = config);
+        await _panelState.DispatchAsync(new NeoHub.Domain.ConfigurationReplaced(sessionId, config));
         _logger.LogInformation("Panel configuration read complete");
     }
 
