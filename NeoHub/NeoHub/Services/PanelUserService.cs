@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+using NeoHub.Domain;
 using System.Diagnostics;
 using DSC.TLink.ITv2;
 using DSC.TLink.ITv2.Enumerations;
@@ -56,12 +58,14 @@ namespace NeoHub.Services
 
             _logger.LogInformation("Reading panel users for session {SessionId}, max users: {MaxUsers}", sessionId, session.MaxUsers);
 
-            { var s = _panelState.GetSession(sessionId); if (s is not null) {
-                s.UserList.IsReading = true;
-                s.UserList.ReadCurrent = 0;
-                s.UserList.ReadTotal = s.MaxUsers;
-                s.UserList.ReadProgress = null;
-            } _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
+            var readTotal = session.MaxUsers;
+            _panelState.Dispatch(new UserListUpdated(sessionId, l => l with
+            {
+                IsReading = true,
+                ReadCurrent = 0,
+                ReadTotal = readTotal,
+                ReadProgress = null,
+            }));
 
             try
             {
@@ -88,12 +92,13 @@ namespace NeoHub.Services
             }
             finally
             {
-                { var s = _panelState.GetSession(sessionId); if (s is not null) {
-                    s.UserList.IsReading = false;
-                    s.UserList.ReadProgress = null;
-                    s.UserList.ReadCurrent = 0;
-                    s.UserList.ReadTotal = 0;
-                } _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
+                _panelState.Dispatch(new UserListUpdated(sessionId, l => l with
+                {
+                    IsReading = false,
+                    ReadProgress = null,
+                    ReadCurrent = 0,
+                    ReadTotal = 0,
+                }));
             }
         }
 
@@ -210,16 +215,14 @@ namespace NeoHub.Services
 
                     // On a crossing, re-read the authoritative panel state so our local copy
                     // reflects whatever the panel actually did (attrs/partitions reset, etc.).
-                    if (crossed)
-                        await RefreshSingleUserAsync(sessionId, user, innerCt);
-
-                    user.LastUpdated = DateTime.UtcNow;
-                    { var s = _panelState.GetSession(sessionId); if (s is not null) s.UserList.Users[idx] = user; _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
+                    var updated = crossed ? await RefreshSingleUserAsync(sessionId, user, innerCt) : user;
+                    updated = updated with { LastUpdated = DateTime.UtcNow };
+                    _panelState.Dispatch(new UserListUpdated(sessionId, l => l with { Users = l.Users.SetItem(idx, updated) }));
 
                     return new PanelUserWriteResult(true)
                     {
                         Crossed = crossed,
-                        UpdatedUser = user,
+                        UpdatedUser = updated,
                     };
                 },
                 ct);
@@ -240,9 +243,7 @@ namespace NeoHub.Services
             int codeLength = existing.CodeLength is 4 or 6 or 8 ? existing.CodeLength!.Value : 4;
             var sentinel = Models.PanelUserState.DisabledAccessCode(codeLength);
 
-            var edited = CloneForEdit(existing);
-            edited.CodeValue = sentinel;
-            edited.CodeLength = codeLength;
+            var edited = existing with { CodeValue = sentinel, CodeLength = codeLength };
 
             // WriteUserAsync detects the crossing, writes the code only, re-reads the slot.
             return WriteUserAsync(sessionId, edited, existing, masterCode, ct);
@@ -261,37 +262,19 @@ namespace NeoHub.Services
             if (session is null || !session.UserList.Users.TryGetValue(userIndex, out var existing))
                 return Task.FromResult(new PanelUserWriteResult(false, "User not found in session"));
 
-            var edited = CloneForEdit(existing);
-            edited.CodeValue = newCode;
-            edited.CodeLength = newCode.Length;
+            var edited = existing with { CodeValue = newCode, CodeLength = newCode.Length };
 
             return WriteUserAsync(sessionId, edited, existing, masterCode, ct);
         }
 
         /// <summary>
-        /// Shallow clone of a <see cref="Models.PanelUserState"/> for use as the "edited" input
-        /// to <see cref="WriteUserAsync"/>. Uses a fresh <c>Partitions</c> list so dirty-check
-        /// sees an independent sequence even though the values are equal.
-        /// </summary>
-        private static Models.PanelUserState CloneForEdit(Models.PanelUserState src) => new()
-        {
-            UserIndex = src.UserIndex,
-            UserLabel = src.UserLabel,
-            CodeValue = src.CodeValue,
-            CodeLength = src.CodeLength,
-            Attributes = src.Attributes,
-            Partitions = new List<byte>(src.Partitions),
-            HasProximityTag = src.HasProximityTag,
-        };
-
-        /// <summary>
         /// Re-reads attributes, partitions, and code configuration for a single user slot
-        /// and patches the in-place <paramref name="user"/> with the fresh values.
+        /// and returns <paramref name="user"/> with the fresh values.
         /// Assumes the caller is already in AccessCodeProgramming mode. Access code and
         /// label are not re-read; the access code was just written and the label is
         /// unaffected by enable/disable crossings.
         /// </summary>
-        private async Task RefreshSingleUserAsync(string sessionId, Models.PanelUserState user, CancellationToken ct)
+        private async Task<Models.PanelUserState> RefreshSingleUserAsync(string sessionId, Models.PanelUserState user, CancellationToken ct)
         {
             int idx = user.UserIndex;
 
@@ -300,21 +283,22 @@ namespace NeoHub.Services
                 new AccessCodeAttributeReadRequest { AccessCodeStart = idx, AccessCodeCount = 1 },
                 ct);
             if (attrResp?.Attributes is { Length: > 0 } attrs)
-                user.Attributes = attrs[0];
+                user = user with { Attributes = attrs[0] };
 
             var partResp = await SendRequestAsync<AccessCodePartitionAssignmentReadResponse>(
                 sessionId,
                 new AccessCodePartitionAssignmentReadRequest { AccessCodeStart = idx, AccessCodeCount = 1 },
                 ct);
             if (partResp?.PartitionAssignments is { Length: > 0 } parts)
-                user.Partitions = parts[0];
+                user = user with { Partitions = parts[0].ToImmutableArray() };
 
             var confResp = await SendRequestAsync<UserCodeConfigurationReadResponse>(
                 sessionId,
                 new UserCodeConfigurationReadRequest { UserCodeStart = idx, UserCodeCount = 1 },
                 ct);
             if (confResp?.CodeType is { Length: > 0 } codeTypes)
-                user.HasProximityTag = codeTypes[0] == UserCodeConfigurationReadResponse.UserCodeType.ProximityTag;
+                user = user with { HasProximityTag = codeTypes[0] == UserCodeConfigurationReadResponse.UserCodeType.ProximityTag };
+            return user;
         }
 
         private async Task<bool> SendCommandAsync(string sessionId, IMessageData command, CancellationToken ct)
@@ -335,7 +319,7 @@ namespace NeoHub.Services
 
         private void UpdateProgress(string sessionId, string message)
         {
-            { var s = _panelState.GetSession(sessionId); if (s is not null) s.UserList.ReadProgress = message; _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
+            _panelState.Dispatch(new UserListUpdated(sessionId, l => l with { ReadProgress = message }));
         }
 
         // ── User labels (via NotificationLabelText) ─────────────────────
@@ -471,24 +455,22 @@ namespace NeoHub.Services
                     CodeValue = codes[i],
                     CodeLength = codes[i]?.Length,
                     Attributes = attrs[i],
-                    Partitions = parts[i],
+                    Partitions = parts[i].ToImmutableArray(),
                     HasProximityTag = confs[i] == UserCodeConfigurationReadResponse.UserCodeType.ProximityTag,
                     LastUpdated = DateTime.UtcNow,
                 };
                 assembled[i] = state;
             }
 
-            { var s = _panelState.GetSession(sessionId); if (s is not null) {
-                foreach (var (idx, state) in assembled)
-                    s.UserList.Users[idx] = state;
-            } _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
-
             sw.Stop();
-            { var s = _panelState.GetSession(sessionId); if (s is not null) {
-                s.UserList.ReadCurrent = maxUsers;
-                s.UserList.ReadProgress = "Finishing…";
-                s.UserList.LastReadAt = DateTime.UtcNow;
-            } _panelState.Dispatch(new NeoHub.Domain.UserListChanged(sessionId)); }
+            var readAt = DateTime.UtcNow;
+            _panelState.Dispatch(new UserListUpdated(sessionId, l => l with
+            {
+                Users = l.Users.SetItems(assembled),
+                ReadCurrent = maxUsers,
+                ReadProgress = "Finishing…",
+                LastReadAt = readAt,
+            }));
 
             _logger.LogInformation("Read {Total} users in {Elapsed}ms", maxUsers, sw.ElapsedMilliseconds);
 

@@ -13,12 +13,15 @@ namespace NeoHub.Services
         private readonly IMediator _mediator;
         private readonly ILogger<PanelCommandService> _logger;
         private readonly IOptionsMonitor<PanelConnectionsSettings> _connectionSettings;
+        private readonly NeoHub.Domain.IPanelOperations _operations;
 
         public PanelCommandService(
             IMediator mediator, 
             ILogger<PanelCommandService> logger,
-            IOptionsMonitor<PanelConnectionsSettings> connectionSettings)
+            IOptionsMonitor<PanelConnectionsSettings> connectionSettings,
+            NeoHub.Domain.IPanelOperations operations)
         {
+            _operations = operations;
             _mediator = mediator;
             _logger = logger;
             _connectionSettings = connectionSettings;
@@ -82,6 +85,15 @@ namespace NeoHub.Services
                 partition, zoneNumber, bypass,
                 string.IsNullOrEmpty(accessCode) && !string.IsNullOrEmpty(conn?.DefaultAccessCode));
 
+            // Enter → write → exit is one panel operation: it never interleaves with the
+            // configuration pull, a configuration write or a user-code operation.
+            return await _operations.RunAsync(sessionId, "zone bypass",
+                _ => BypassInProgrammingModeAsync(sessionId, partition, zoneNumber, bypass, code));
+        }
+
+        private async Task<PanelCommandResult> BypassInProgrammingModeAsync(
+            string sessionId, byte partition, byte zoneNumber, bool bypass, string code)
+        {
             var enterResult = await SendCommandAsync(sessionId, new ConfigurationEnter
             {
                 Partition = partition,

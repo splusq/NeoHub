@@ -3,9 +3,9 @@ using DSC.TLink.ITv2.Enumerations;
 namespace NeoHub.Services.Models
 {
     /// <summary>
-    /// In-memory representation of a panel user slot.
+    /// In-memory representation of a panel user slot. Immutable: edit with <c>with</c>.
     /// </summary>
-    public class PanelUserState
+    public sealed record PanelUserState
     {
         /// <summary>
         /// Returns the canonical disabled-access-code sentinel for a panel of the given
@@ -33,15 +33,15 @@ namespace NeoHub.Services.Models
             return true;
         }
 
-        public int UserIndex { get; set; }
-        public string? UserLabel { get; set; }
-        public string? CodeValue { get; set; }
-        public int? CodeLength { get; set; }
-        public bool HasProximityTag { get; set; }
-        public PanelUserAttributes Attributes { get; set; }
-        public List<byte> Partitions { get; set; } = new();
+        public int UserIndex { get; init; }
+        public string? UserLabel { get; init; }
+        public string? CodeValue { get; init; }
+        public int? CodeLength { get; init; }
+        public bool HasProximityTag { get; init; }
+        public PanelUserAttributes Attributes { get; init; }
+        public System.Collections.Immutable.ImmutableArray<byte> Partitions { get; init; } = System.Collections.Immutable.ImmutableArray<byte>.Empty;
 
-        public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
+        public DateTime LastUpdated { get; init; }
 
         /// <summary>
         /// DSC panels hard-code user 1 as the master. The master has special rules: the panel

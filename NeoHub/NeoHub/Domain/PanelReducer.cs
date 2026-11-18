@@ -31,7 +31,6 @@ namespace NeoHub.Domain
             {
                 case SessionStarted s:
                 {
-                    var carried = sessions.GetValueOrDefault(s.SessionId);
                     var fresh = new SessionState
                     {
                         SessionId = s.SessionId,
@@ -40,8 +39,6 @@ namespace NeoHub.Domain
                         ConnectedAt = s.At.UtcDateTime,
                         LastMessageAt = s.At.UtcDateTime,
                         LastUpdated = s.At.UtcDateTime,
-                        // Interim: one lock per panel for the life of the process (survives reconnects).
-                        ConfigLock = carried?.ConfigLock ?? new SemaphoreSlim(1, 1),
                     };
                     sessions = sessions.SetItem(s.SessionId, fresh);
                     changes.Add(new SessionChanged(s.SessionId, fresh));
@@ -52,14 +49,7 @@ namespace NeoHub.Domain
                 {
                     if (sessions.TryGetValue(ended.SessionId, out var current) && current.ConnectionId == ended.Connection)
                     {
-                        // Keep the lock object for the next connection; drop everything else.
-                        sessions = sessions.SetItem(ended.SessionId, new SessionState
-                        {
-                            SessionId = ended.SessionId,
-                            ConnectionId = Guid.Empty,
-                            ConfigLock = current.ConfigLock,
-                            ConnectionPhase = ConnectionPhase.Disconnected,
-                        });
+                        sessions = sessions.Remove(ended.SessionId);
                         changes.Add(new SessionRemoved(ended.SessionId));
                     }
                     break;
@@ -98,8 +88,8 @@ namespace NeoHub.Domain
                 case ConfigurationReplaced c:
                     return Changed(s with { Configuration = c.Configuration }, changes);
 
-                case UserListChanged:
-                    return Changed(s, changes);
+                case UserListUpdated u:
+                    return Changed(s with { UserList = u.Update(s.UserList) }, changes);
 
                 case InstallerSetupApplied setup:
                     return Setup(s, setup, changes);
@@ -258,9 +248,19 @@ namespace NeoHub.Domain
                     return s;
 
                 case NotificationLabelText.LabelCollection.User:
-                    changes.Add(new UserLabelsReceived(s.SessionId, msg.Start,
-                        msg.Labels.Select(l => string.IsNullOrEmpty(l?.Trim()) ? null : l.Trim()).ToImmutableArray()));
-                    return s;
+                {
+                    // Only users already read get labels (as before).
+                    var users = s.UserList.Users;
+                    for (int i = 0; i < msg.Labels.Length; i++)
+                    {
+                        var label = msg.Labels[i]?.Trim();
+                        if (users.TryGetValue(msg.Start + i, out var user))
+                            users = users.SetItem(msg.Start + i, user with { UserLabel = string.IsNullOrEmpty(label) ? null : label });
+                    }
+                    return ReferenceEquals(users, s.UserList.Users)
+                        ? s
+                        : Changed(s with { UserList = s.UserList with { Users = users } }, changes);
+                }
 
                 default:
                     return s;

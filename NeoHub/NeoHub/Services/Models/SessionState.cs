@@ -6,9 +6,8 @@ namespace NeoHub.Services.Models
     /// <summary>
     /// Represents a complete session (panel connection) with its partitions and zones.
     /// Immutable: changed only by <see cref="Domain.PanelReducer"/>.
-    /// Interim (until the operations phase): <see cref="UserList"/> and <see cref="Configuration"/>
-    /// are still mutable objects edited in place by their services, and <see cref="ConfigLock"/>
-    /// is a semaphore; all three are carried across copies by reference.
+    /// Programming-mode operations are serialized by <see cref="Domain.IPanelOperations"/>, not by
+    /// anything stored here.
     /// </summary>
     public sealed record SessionState
     {
@@ -47,11 +46,6 @@ namespace NeoHub.Services.Models
         /// </summary>
         public bool IsInitialized { get; init; }
 
-        /// <summary>
-        /// Serializes panel configuration operations (reads and writes).
-        /// Prevents the initial handler pull and user-initiated operations from interleaving.
-        /// </summary>
-        public SemaphoreSlim ConfigLock { get; init; } = new(1, 1);
 
         /// <summary>
         /// When this session was established.

@@ -72,10 +72,6 @@ namespace NeoHub.Domain
         public IReadOnlyDictionary<byte, ZoneState> GetZones(string sessionId)
             => (IReadOnlyDictionary<byte, ZoneState>?)GetSession(sessionId)?.Zones ?? ImmutableDictionary<byte, ZoneState>.Empty;
 
-        /// <summary>The programming lock for a panel, if it has connected (interim, until the operations phase).</summary>
-        public SemaphoreSlim? GetConfigLock(string sessionId)
-            => Volatile.Read(ref _state).Sessions.GetValueOrDefault(sessionId)?.ConfigLock;
-
         // ── IPanelMessageSink ──
 
         void IPanelMessageSink.Started(string sessionId, Guid connectionId, DateTimeOffset at)
@@ -138,20 +134,7 @@ namespace NeoHub.Domain
                     _logger.LogInformation("Configuration complete");
                     Raise(ConfigurationComplete, new ConfigurationCompleteEventArgs { SessionId = c.SessionId });
                     break;
-                case UserLabelsReceived u:
-                    ApplyUserLabels(u);
-                    break;
             }
-        }
-
-        /// <summary>Interim: the user list is still a mutable object (until the operations phase).</summary>
-        private void ApplyUserLabels(UserLabelsReceived u)
-        {
-            if (GetSession(u.SessionId) is not { } session)
-                return;
-            for (int i = 0; i < u.Labels.Length; i++)
-                if (session.UserList.Users.TryGetValue(u.Start + i, out var user))
-                    user.UserLabel = u.Labels[i];
         }
 
         private void Raise<T>(EventHandler<T>? handler, T args)

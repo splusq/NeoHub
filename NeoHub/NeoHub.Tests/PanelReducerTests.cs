@@ -118,17 +118,14 @@ public class PanelReducerTests
     }
 
     [Fact]
-    public void ConnectionEnding_ClearsState_ButKeepsTheProgrammingLock()
+    public void ConnectionEnding_RemovesTheState_AndAReconnectStartsFresh()
     {
-        var started = Run(new SessionStarted(Panel, A, T), Msg(Zone(1, true)));
-        var lockObject = started.Sessions[Panel].ConfigLock;
-
-        var ended = Run(started, new SessionEnded(Panel, A));
+        var ended = Run(new SessionStarted(Panel, A, T), Msg(Zone(1, true)), new SessionEnded(Panel, A));
         var reconnected = Run(ended, new SessionStarted(Panel, B, T.AddSeconds(5)));
 
-        Assert.Equal(Guid.Empty, ended.Sessions[Panel].ConnectionId);
+        Assert.False(ended.Sessions.ContainsKey(Panel));
         Assert.Empty(reconnected.Sessions[Panel].Zones);
-        Assert.Same(lockObject, reconnected.Sessions[Panel].ConfigLock);
+        Assert.Equal(B, reconnected.Sessions[Panel].ConnectionId);
     }
 
     // ── Pulled status vs live events ──

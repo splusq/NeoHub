@@ -66,7 +66,7 @@ public interface IPanelAccessCodeService
     // ── Authenticated operations ─────────────────────────────────────────────
 
     /// <summary>
-    /// Acquires <see cref="SessionState.ConfigLock"/>, enters the programming mode corresponding
+    /// Runs as one queued panel operation (<see cref="NeoHub.Domain.IPanelOperations"/>), enters the programming mode corresponding
     /// to <paramref name="kind"/> authenticated with <paramref name="code"/>, runs
     /// <paramref name="operation"/>, then always exits programming mode and releases the lock.
     /// The shared lock serializes installer and master operations against each other for the
@@ -92,7 +92,8 @@ public class PanelAccessCodeService(
     IPanelStateService panelState,
     IOptionsMonitor<PanelConnectionsSettings> connectionSettings,
     ISettingsPersistenceService persistence,
-    ILogger<PanelAccessCodeService> logger)
+    ILogger<PanelAccessCodeService> logger,
+    NeoHub.Domain.IPanelOperations operations)
     : IPanelAccessCodeService
 {
     /// <summary>How long to wait for the panel's programming-mode confirmation (LeadIn).</summary>
@@ -210,20 +211,19 @@ public class PanelAccessCodeService(
         if (session is null)
             return new PanelAccessResult<T>(false, default, "Session not found");
 
-        // Acquire the shared panel-mode lock for the full scope. This serializes all installer
-        // and master operations for the same session — verify, reads, writes — so we never have
-        // two callers fighting over the panel's single programming-mode slot.
-        await session.ConfigLock.WaitAsync(ct);
-        try
+        // One panel operation for the full scope: verify, reads and writes for the same panel
+        // never fight over its single programming-mode slot (or interleave with the pull, a
+        // configuration write or a bypass).
+        return await operations.RunAsync(sessionId, $"{kind} code operation", async opCt =>
         {
             var mode = MapProgrammingMode(kind);
 
-            if (!await EnterProgrammingModeAsync(sessionId, session, mode, code, readWrite, ct))
+            if (!await EnterProgrammingModeAsync(sessionId, session, mode, code, readWrite, opCt))
                 return new PanelAccessResult<T>(false, default, $"Panel rejected {kind} code");
 
             try
             {
-                var result = await operation(ct);
+                var result = await operation(opCt);
                 return new PanelAccessResult<T>(true, result);
             }
             catch (Exception ex)
@@ -233,13 +233,9 @@ public class PanelAccessCodeService(
             }
             finally
             {
-                await ExitProgrammingModeAsync(sessionId, ct);
+                await ExitProgrammingModeAsync(sessionId, opCt);
             }
-        }
-        finally
-        {
-            session.ConfigLock.Release();
-        }
+        }, ct);
     }
 
     public async Task<bool> VerifyAsync(string sessionId, PanelAccessCodeKind kind, string code, CancellationToken ct)
