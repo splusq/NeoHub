@@ -25,7 +25,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build
-        run: dotnet build NeoHub/TLink.Tests/DSC.TLink.Tests.csproj -c Release
+        run: |
+          dotnet build NeoHub/TLink.Tests/DSC.TLink.Tests.csproj -c Release
+          dotnet build NeoHub/NeoHub.Tests/NeoHub.Tests.csproj -c Release
 
       - name: Test (10 runs, ${{ matrix.cores }} core(s))
         env:
@@ -34,4 +36,5 @@ jobs:
         run: |
           for i in $(seq 1 10); do
             dotnet test NeoHub/TLink.Tests/DSC.TLink.Tests.csproj -c Release --no-build --blame-hang-timeout 120s
+            dotnet test NeoHub/NeoHub.Tests/NeoHub.Tests.csproj -c Release --no-build --blame-hang-timeout 120s
           done

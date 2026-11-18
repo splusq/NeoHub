@@ -27,6 +27,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="DSC.TLink.Tests" />
     <InternalsVisibleTo Include="CaptureTool" />
+    <InternalsVisibleTo Include="NeoHub.Tests" />
   </ItemGroup>
 
   <ItemGroup>
