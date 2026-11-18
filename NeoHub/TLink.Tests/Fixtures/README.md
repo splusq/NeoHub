@@ -18,7 +18,7 @@ One file per panel connection, `connection-NN.jsonl`. Each line is one event, in
 | `disconnect` | `ms` | The connection ended. |
 
 `frame` is the complete ITv2 packet as hex: `[length 1–2 B][sender seq][receiver seq][command 2 B][payload][CRC16]`,
-exactly what `ITv2Session` encrypts or decrypts. Encrypted wire bytes and TLink headers are not included.
+exactly what `PanelConnection` encrypts or decrypts. Encrypted wire bytes and TLink headers are not included.
 
 `roundTrips` says whether the codec (`MessageFactory`) re-encodes the decoded message to the same
 bytes. It is `true` for every captured frame; `CodecGoldenTests.EveryCapturedFrame_RoundTrips`
