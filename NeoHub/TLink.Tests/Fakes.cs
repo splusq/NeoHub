@@ -10,6 +10,8 @@ namespace DSC.TLink.Tests;
 internal sealed class FakeSession(string sessionId, string name) : IITv2Session
 {
     public string SessionId => sessionId;
+    public CancellationTokenSource LifetimeSource { get; } = new();
+    public CancellationToken Lifetime => LifetimeSource.Token;
     public int DisposeCount;
 
     public Task<Result<IMessageData>> SendAsync(IMessageData message, CancellationToken ct = default)

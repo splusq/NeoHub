@@ -6,6 +6,10 @@ namespace NeoHub.Services
     public class PanelStateService : IPanelStateService
     {
         private readonly ConcurrentDictionary<string, SessionState> _sessions = new();
+
+        // One programming-mode lock per panel ID for the life of the process. Kept outside
+        // SessionState because that is removed on disconnect and recreated on reconnect.
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _configLocks = new();
         private readonly ILogger<PanelStateService> _logger;
 
         public event EventHandler<SessionStateChangedEventArgs>? SessionStateChanged;
@@ -32,7 +36,11 @@ namespace NeoHub.Services
 
         private SessionState GetOrCreateSession(string sessionId)
         {
-            return _sessions.GetOrAdd(sessionId, id => new SessionState { SessionId = id });
+            return _sessions.GetOrAdd(sessionId, id => new SessionState
+            {
+                SessionId = id,
+                ConfigLock = GetConfigLock(id),
+            });
         }
 
         public void UpdateSession(string sessionId, Action<SessionState> update)
@@ -50,6 +58,10 @@ namespace NeoHub.Services
                 Session = session
             });
         }
+
+        /// <inheritdoc />
+        public SemaphoreSlim GetConfigLock(string sessionId)
+            => _configLocks.GetOrAdd(sessionId, _ => new SemaphoreSlim(1, 1));
 
         public void RemoveSession(string sessionId)
         {
@@ -70,7 +82,7 @@ namespace NeoHub.Services
         public IReadOnlyDictionary<byte, PartitionState> GetPartitions(string sessionId)
         {
             var session = GetSession(sessionId);
-            return session?.Partitions ?? new Dictionary<byte, PartitionState>();
+            return (IReadOnlyDictionary<byte, PartitionState>?)session?.Partitions ?? new Dictionary<byte, PartitionState>();
         }
 
         public void UpdatePartition(string sessionId, PartitionState partition)
@@ -103,7 +115,7 @@ namespace NeoHub.Services
         public IReadOnlyDictionary<byte, ZoneState> GetZones(string sessionId)
         {
             var session = GetSession(sessionId);
-            return session?.Zones ?? new Dictionary<byte, ZoneState>();
+            return (IReadOnlyDictionary<byte, ZoneState>?)session?.Zones ?? new Dictionary<byte, ZoneState>();
         }
 
         public void UpdateZone(string sessionId, ZoneState zone)
