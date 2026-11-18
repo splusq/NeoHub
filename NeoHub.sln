@@ -17,6 +17,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DSC.TLink.Tests", "NeoHub\TLink.Tests\DSC.TLink.Tests.csproj", "{60D75487-BC73-44FC-9D0A-A499B36B3600}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CaptureTool", "tools\CaptureTool\CaptureTool.csproj", "{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -63,6 +65,18 @@ Global
 		{60D75487-BC73-44FC-9D0A-A499B36B3600}.Release|x64.Build.0 = Release|Any CPU
 		{60D75487-BC73-44FC-9D0A-A499B36B3600}.Release|x86.ActiveCfg = Release|Any CPU
 		{60D75487-BC73-44FC-9D0A-A499B36B3600}.Release|x86.Build.0 = Release|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Debug|x64.Build.0 = Debug|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Debug|x86.Build.0 = Debug|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Release|Any CPU.Build.0 = Release|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Release|x64.ActiveCfg = Release|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Release|x64.Build.0 = Release|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Release|x86.ActiveCfg = Release|Any CPU
+		{293FF2AB-D96A-44F6-B2BA-8A7340EC7E93}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
