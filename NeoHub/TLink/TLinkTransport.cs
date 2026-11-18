@@ -79,11 +79,13 @@ internal class TLinkTransport : ITLinkTransport
             }
 
             var buffer = readResult.Buffer;
+            var extracted = false;
 
             try
             {
                 if (TryExtractPacket(ref buffer, out var rawPacket))
                 {
+                    extracted = true;
                     _logger.LogTrace("Recv {Packet}", new HexBytes(rawPacket.ToArray()));
 
                     var transformResult = TransformInbound(rawPacket);
@@ -117,7 +119,10 @@ internal class TLinkTransport : ITLinkTransport
             }
             finally
             {
-                reader.AdvanceTo(buffer.Start, buffer.End);
+                // After taking a frame, only that frame was examined: bytes already buffered
+                // after it (a second frame from the same read) must come back on the next read
+                // at once. Marking them examined would hold them until more data arrived.
+                reader.AdvanceTo(buffer.Start, extracted ? buffer.Start : buffer.End);
             }
 
             if (readResult.IsCompleted)

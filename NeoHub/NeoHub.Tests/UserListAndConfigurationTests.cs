@@ -98,14 +98,14 @@ public class UserListAndConfigurationTests
         });
         // Zone labels arrive from the panel as UTF-16BE, 28 characters each.
         static byte[] Label(string text) => System.Text.Encoding.BigEndianUnicode.GetBytes(text.PadRight(28));
-        original.ZoneLabels.ImportItem(1, Label("FRONT DOOR"));
+        original.ZoneLabels.ImportItem(1, Label("ZONE ONE"));
 
         var copy = original.Clone();
         Assert.Equal(original.AllSections.Select(s => Convert.ToHexString(s.Export())),
                      copy.AllSections.Select(s => Convert.ToHexString(s.Export())));
 
         copy.ZoneLabels.ImportItem(1, Label("BACK DOOR"));
-        Assert.StartsWith("FRONT DOOR", original.ZoneLabels[1]);
+        Assert.StartsWith("ZONE ONE", original.ZoneLabels[1]);
         Assert.StartsWith("BACK DOOR", copy.ZoneLabels[1]);
     }
 

@@ -786,16 +786,10 @@ If encryption negotiation fails during `RequestAccess`:
   - This provides a 20-second safety margin before the 120-second timeout
 - The `ConnectionPoll` is a notification message and follows the standard protocol transaction pattern (send → receive SimpleAck)
 
-**Implementation:**
-```csharp
-// From ITv2Session.cs beginHeartBeat method:
-do
-{
-    await Task.Delay(TimeSpan.FromSeconds(100), cancellation);
-    await SendAsync(new ConnectionPoll(), cancellation);
-    _logger.LogDebug("Sent Heartbeat");
-} while (!cancellation.IsCancellationRequested);
-```
+**Implementation:** `Connection.Step` (`TLink/ITv2/Protocol/Connection.cs`) sends a `ConnectionPoll`
+`HeartbeatInterval` (100 s) after the previous poll finished, waits `HeartbeatAckTimeout` (30 s) for its ack,
+and closes the connection after `MaxMissedHeartbeats` (3) polls with no traffic at all. Values are in
+`ConnectionTimings.cs`; `ConnectionScenarioTests` covers each rule on a fake clock.
 
 **Other Timeouts:**
 - Queue flush timeout: **2 seconds** before allowing outbound commands after reconnection
@@ -936,21 +930,10 @@ Implement a **"receive queue flush"** mechanism:
 2. **Wait for quiet period**: Do not send any outbound messages until the connection has been quiet (no incoming messages) for **1-2 seconds**
 3. Only after the quiet period, begin sending outbound traffic
 
-**Implementation Example:**
-
-```csharp
-// From ITv2Session.cs ListenAsync method:
-Timer? flushQueueTimer = new Timer(_ => 
-{
-    _log.LogInformation("Receive queue is flushed. Ready to start sending");
-    flushQueueTCS.SetResult();  // Unblock sending
-    flushQueueTimer = null;
-    beginHeartBeat(linkedToken);
-});
-
-// Reset timer with each incoming message
-flushQueueTimer?.Change(2000, Timeout.Infinite);
-```
+**Implementation:** `Connection.Step` holds requests until the panel has been quiet for
+`ReadyQuietPeriod` (2 s) after the handshake, or `MaxReadyWait` (10 s) at most, so a panel that never
+goes quiet still becomes ready. Burst notifications are acked as they arrive but not published (they
+replay the panel's queue; the configuration pull reads current status once the connection is ready).
 
 This approach ensures the alarm panel has finished replaying its queued notifications before the server attempts to send new messages, avoiding sequence conflicts and protocol errors.
 
@@ -965,8 +948,9 @@ This approach ensures the alarm panel has finished replaying its queued notifica
 ## References
 
 - Implementation: `DSC.TLink` namespace
-- TLink: `TLinkClient.cs`
-- ITv2 Session: `ITv2Session.cs`
+- TLink framing: `TLinkTransport.cs`
+- ITv2 protocol state machine: `ITv2/Protocol/Connection.cs`; runtime: `ITv2/Runtime/PanelConnection.cs`
+- Architecture: [Architecture.md](Architecture.md)
 - Message Definitions: `DSC.TLink.ITv2.Messages` namespace
 
 ---

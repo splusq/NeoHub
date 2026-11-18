@@ -189,36 +189,72 @@ namespace NeoHub.Services.Settings
         }
     }
 
-    /// <summary>Replaces a file's contents so readers see either the old file or the new one, never a mix.</summary>
+    /// <summary>
+    /// Replaces a file's contents so readers (and a crash) see either the old file or the new
+    /// one, never a mix: write a temp file in the same directory, flush it to disk, rename it over
+    /// the target.
+    /// </summary>
     public static class AtomicFile
     {
-        public static async Task WriteAllTextAsync(string path, string contents, ILogger? log = null)
+        public static Task WriteAllTextAsync(string path, string contents, ILogger? log = null)
+            => WriteAllBytesAsync(path, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(contents), log);
+
+        public static async Task WriteAllBytesAsync(string path, byte[] contents, ILogger? log = null)
         {
-            var temp = $"{path}.{Guid.NewGuid():N}.tmp";
+            var temp = TempPath(path);
             try
             {
                 await using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-                await using (var writer = new StreamWriter(stream))
                 {
-                    await writer.WriteAsync(contents);
-                    await writer.FlushAsync();
+                    await stream.WriteAsync(contents);
                     stream.Flush(flushToDisk: true);
                 }
-                try
-                {
-                    File.Move(temp, path, overwrite: true);
-                }
-                catch (IOException ex)
-                {
-                    // E.g. the file itself is a bind mount, which can't be replaced by rename.
-                    log?.LogWarning("Could not replace {Path} atomically ({Error}); writing it in place", path, ex.Message);
-                    await File.WriteAllTextAsync(path, contents);
-                }
+                if (!TryReplace(temp, path, log))
+                    await File.WriteAllBytesAsync(path, contents);
             }
             finally
             {
                 if (File.Exists(temp))
                     File.Delete(temp);
+            }
+        }
+
+        /// <summary>For startup code that runs before anything is asynchronous.</summary>
+        public static void WriteAllText(string path, string contents, ILogger? log = null)
+        {
+            var bytes = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(contents);
+            var temp = TempPath(path);
+            try
+            {
+                using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(bytes);
+                    stream.Flush(flushToDisk: true);
+                }
+                if (!TryReplace(temp, path, log))
+                    File.WriteAllBytes(path, bytes);
+            }
+            finally
+            {
+                if (File.Exists(temp))
+                    File.Delete(temp);
+            }
+        }
+
+        private static string TempPath(string path) => $"{path}.{Guid.NewGuid():N}.tmp";
+
+        private static bool TryReplace(string temp, string path, ILogger? log)
+        {
+            try
+            {
+                File.Move(temp, path, overwrite: true);
+                return true;
+            }
+            catch (IOException ex)
+            {
+                // E.g. the file itself is a bind mount, which can't be replaced by rename.
+                log?.LogWarning("Could not replace {Path} atomically ({Error}); writing it in place", path, ex.Message);
+                return false;
             }
         }
     }

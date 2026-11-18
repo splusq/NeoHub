@@ -207,11 +207,11 @@ public class PanelReducerTests
             Collection = NotificationLabelText.LabelCollection.Zone,
             Start = 3,
             End = 4,
-            Labels = ["FRONT DOOR    ENTRY         ", "SHORT"],
+            Labels = ["ZONE ONE      ENTRY         ", "SHORT"],
         }));
 
         var zones = state.Sessions[Panel].Zones;
-        Assert.Equal("FRONT DOOR ENTRY", zones[3].DisplayName);
+        Assert.Equal("ZONE ONE ENTRY", zones[3].DisplayName);
         Assert.Equal("SHORT", zones[4].DisplayName);
     }
 
