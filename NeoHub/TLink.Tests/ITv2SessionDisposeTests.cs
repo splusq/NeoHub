@@ -1,4 +1,3 @@
-using System.Reflection;
 using DSC.TLink.ITv2;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -6,17 +5,8 @@ namespace DSC.TLink.Tests;
 
 public class ITv2SessionDisposeTests
 {
-    // ITv2Session is normally built by CreateAsync after a live handshake; for disposal we
-    // only need an instance, so use the private constructor with a silent transport.
     private static ITv2Session CreateSession(SilentTransport transport)
-    {
-        var ctor = typeof(ITv2Session).GetConstructor(
-            BindingFlags.Instance | BindingFlags.NonPublic,
-            [typeof(ITLinkTransport), typeof(IConnectionSettingsProvider), typeof(Microsoft.Extensions.Logging.ILogger<ITv2Session>)])
-            ?? throw new InvalidOperationException("ITv2Session constructor not found");
-
-        return (ITv2Session)ctor.Invoke([transport, new NullSettingsProvider(), NullLogger<ITv2Session>.Instance]);
-    }
+        => ITv2Session.CreateForTesting(transport, "200000000001", NullLoggerFactory.Instance);
 
     /// <summary>
     /// The session manager disposes a session it replaces, and the connection handler's
