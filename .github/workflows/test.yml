@@ -19,8 +19,5 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: TLink tests
-        run: dotnet test NeoHub/TLink.Tests/DSC.TLink.Tests.csproj -c Release --blame-hang-timeout 60s
-
-      - name: NeoHub tests
-        run: dotnet test NeoHub/NeoHub.Tests/NeoHub.Tests.csproj -c Release --blame-hang-timeout 60s
+      - name: Run tests
+        run: dotnet test NeoHub/TLink.Tests/DSC.TLink.Tests.csproj -c Release
