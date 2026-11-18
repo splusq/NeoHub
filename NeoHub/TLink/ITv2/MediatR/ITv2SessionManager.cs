@@ -53,7 +53,7 @@ namespace DSC.TLink.ITv2.MediatR
             {
                 _logger.LogInformation("Session registered. Active sessions: {Count}",
                     _sessions.Count);
-                PublishLifecycleNotification(new SessionConnectedNotification(sessionId, session.Lifetime));
+                PublishLifecycleNotification(new SessionConnectedNotification(sessionId));
                 return;
             }
 
@@ -62,7 +62,7 @@ namespace DSC.TLink.ITv2.MediatR
             // Reset state for the old connection before the new one starts its configuration pull.
             PublishLifecycleNotifications(
                 new SessionDisconnectedNotification(sessionId),
-                new SessionConnectedNotification(sessionId, session.Lifetime));
+                new SessionConnectedNotification(sessionId));
 
             _ = DisposeStaleSessionAsync(stale);
         }
@@ -82,7 +82,7 @@ namespace DSC.TLink.ITv2.MediatR
             }
             else
             {
-                _logger.LogInformation("Session was already unregistered (replaced by a reconnect or disconnected on purpose)");
+                _logger.LogInformation("Superseded session closed; the current session stays registered");
             }
         }
 

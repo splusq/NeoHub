@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using NeoHub.Services.PanelConfiguration;
 
 namespace NeoHub.Services.Models
@@ -14,10 +13,8 @@ namespace NeoHub.Services.Models
         public int MaxZones { get; set; }
         public int MaxPartitions { get; set; }
         public int MaxUsers { get; set; }
-        // Concurrent: written by the notification loop and the configuration pull, read by the
-        // UI and the WebSocket full_state snapshot at the same time.
-        public ConcurrentDictionary<byte, PartitionState> Partitions { get; } = new();
-        public ConcurrentDictionary<byte, ZoneState> Zones { get; } = new();
+        public Dictionary<byte, PartitionState> Partitions { get; } = new();
+        public Dictionary<byte, ZoneState> Zones { get; } = new();
 
         /// <summary>
         /// User slots and user-read operation state. Parallels <see cref="Configuration"/>.
@@ -43,14 +40,10 @@ namespace NeoHub.Services.Models
         public bool IsInitialized { get; set; }
 
         /// <summary>
-        /// Serializes panel programming-mode operations (configuration reads and writes, user
-        /// codes, zone bypass), so the initial pull and user-initiated operations never interleave
-        /// their enter/exit programming sequences.
-        /// Owned by <see cref="PanelStateService"/> per panel ID, not per connection: it survives
-        /// a disconnect/reconnect, so an operation still running for the old connection and one
-        /// started for the new connection contend for the same lock.
+        /// Serializes panel configuration operations (reads and writes).
+        /// Prevents the initial handler pull and user-initiated operations from interleaving.
         /// </summary>
-        public required SemaphoreSlim ConfigLock { get; init; }
+        public SemaphoreSlim ConfigLock { get; } = new(1, 1);
 
         /// <summary>
         /// When this session was established.

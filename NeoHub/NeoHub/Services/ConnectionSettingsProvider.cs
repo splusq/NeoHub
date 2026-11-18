@@ -16,10 +16,6 @@ public class ConnectionSettingsProvider : IConnectionSettingsProvider
     private readonly ISessionMonitor _sessionMonitor;
     private readonly ILogger<ConnectionSettingsProvider> _logger;
 
-    // Guards the shared settings object (IOptionsMonitor.CurrentValue): two panels can
-    // handshake at once, and the settings UI edits the same list.
-    private readonly object _gate = new();
-
     public ConnectionSettingsProvider(
         IOptionsMonitor<PanelConnectionsSettings> settings,
         ISettingsPersistenceService persistence,
@@ -34,12 +30,7 @@ public class ConnectionSettingsProvider : IConnectionSettingsProvider
 
     public ConnectionSettings? ResolveConnection(string sessionId, EncryptionType encryptionType)
     {
-        lock (_gate)
-            return ResolveConnectionLocked(sessionId, encryptionType);
-    }
-
-    private ConnectionSettings? ResolveConnectionLocked(string sessionId, EncryptionType encryptionType)
-    {
+        var connections = _settings.CurrentValue.Connections;
         var existing = _settings.CurrentValue.FindBySessionId(sessionId);
 
         if (existing == null)
@@ -47,10 +38,9 @@ public class ConnectionSettingsProvider : IConnectionSettingsProvider
             _logger.LogWarning(
                 "Unknown panel {SessionId} (encryption: {EncryptionType}). Creating placeholder connection entry.",
                 sessionId, encryptionType);
-            // Fall through — try factory defaults on the newly created placeholder.
-            // Use the entry we created, not "the last one": another panel or a settings
-            // reload could have changed the list in between.
-            existing = CreatePlaceholder(sessionId, encryptionType);
+            CreatePlaceholder(sessionId, encryptionType);
+            // Fall through — try factory defaults on the newly created placeholder
+            existing = connections.Last();
         }
 
         // Always update encryption type to match what the panel actually uses
@@ -100,12 +90,6 @@ public class ConnectionSettingsProvider : IConnectionSettingsProvider
 
     public void ConfirmDefaults(string sessionId)
     {
-        lock (_gate)
-            ConfirmDefaultsLocked(sessionId);
-    }
-
-    private void ConfirmDefaultsLocked(string sessionId)
-    {
         var existing = _settings.CurrentValue.FindBySessionId(sessionId);
 
         if (existing == null || existing.IsComplete)
@@ -129,7 +113,7 @@ public class ConnectionSettingsProvider : IConnectionSettingsProvider
         PersistSettingsAsync();
     }
 
-    private ConnectionSettings CreatePlaceholder(string sessionId, EncryptionType encryptionType)
+    private void CreatePlaceholder(string sessionId, EncryptionType encryptionType)
     {
         var placeholder = new ConnectionSettings
         {
@@ -140,24 +124,13 @@ public class ConnectionSettingsProvider : IConnectionSettingsProvider
         _settings.CurrentValue.Connections.Add(placeholder);
         PersistSettingsAsync();
         _sessionMonitor.NotifyChanged();
-        return placeholder;
     }
 
-    /// <summary>
-    /// Saves in the background. Called with <see cref="_gate"/> held: the list is copied here,
-    /// so the save serializes a stable snapshot rather than a list another thread may change
-    /// while it is being written.
-    /// </summary>
     private async void PersistSettingsAsync()
     {
-        var snapshot = new PanelConnectionsSettings
-        {
-            Connections = new List<ConnectionSettings>(_settings.CurrentValue.Connections)
-        };
-
         try
         {
-            await _persistence.SaveSettingsAsync(typeof(PanelConnectionsSettings), snapshot);
+            await _persistence.SaveSettingsAsync(typeof(PanelConnectionsSettings), _settings.CurrentValue);
         }
         catch (Exception ex)
         {
