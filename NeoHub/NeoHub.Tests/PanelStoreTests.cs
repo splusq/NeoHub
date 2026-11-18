@@ -23,7 +23,7 @@ public class PanelStoreTests : IAsyncLifetime
     public Task InitializeAsync() => Task.CompletedTask;
     public async Task DisposeAsync() => await _store.DisposeAsync();
 
-    private Task Barrier() => _store.DispatchAsync(new UserListChanged("barrier")).WaitAsync(Guard);
+    private Task Barrier() => _store.DispatchAsync(new UserListUpdated("barrier", l => l)).WaitAsync(Guard);
 
     private static NotificationLifestyleZoneStatus Zone(byte zone, bool open) => new()
     {

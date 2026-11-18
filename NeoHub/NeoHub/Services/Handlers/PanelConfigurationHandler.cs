@@ -26,6 +26,7 @@ namespace NeoHub.Services.Handlers
         private readonly IOptionsMonitor<PanelConnectionsSettings> _connectionSettings;
         private readonly ILogger<PanelConfigurationHandler> _logger;
         private readonly TimeProvider _time;
+        private readonly IPanelOperations _operations;
 
         public PanelConfigurationHandler(
             IMediator mediator,
@@ -33,9 +34,11 @@ namespace NeoHub.Services.Handlers
             IPanelConfigurationService configService,
             IOptionsMonitor<PanelConnectionsSettings> connectionSettings,
             ILogger<PanelConfigurationHandler> logger,
-            TimeProvider time)
+            TimeProvider time,
+            IPanelOperations operations)
         {
             _time = time;
+            _operations = operations;
             _mediator = mediator;
             _panelState = panelState;
             _configService = configService;
@@ -61,13 +64,31 @@ namespace NeoHub.Services.Handlers
                 return;
             }
 
-            // Acquire the config lock for the entire initialization sequence. Captured once, so
-            // the lock released is the lock acquired.
-            var configLock = session.ConfigLock;
-            await configLock.WaitAsync(cancellationToken);
+            // The whole pull is one panel operation: nothing else enters programming mode until it
+            // is done. It stops if this connection ends (including being replaced).
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, notification.ConnectionLifetime);
             var completed = false;
-
             try
+            {
+                completed = await _operations.RunAsync(sessionId, "configuration pull",
+                    ct => PullAsync(sessionId, connection, ct), stop.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("Panel configuration pull stopped: its connection ended or the host is stopping");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during panel configuration pull");
+            }
+            finally
+            {
+                await _panelState.DispatchAsync(new InitialPullFinished(sessionId, connection, completed));
+            }
+        }
+
+        private async Task<bool> PullAsync(string sessionId, Guid? connection, CancellationToken cancellationToken)
+        {
             {
                 // ── 1. Capabilities ──
                 var capabilities = await RequestAsync<ConnectionSystemCapabilities>(
@@ -78,7 +99,7 @@ namespace NeoHub.Services.Handlers
                 if (capabilities == null)
                 {
                     _logger.LogWarning("Failed to get system capabilities, aborting config pull");
-                    return;
+                    return false;
                 }
 
                 _logger.LogInformation(
@@ -104,7 +125,7 @@ namespace NeoHub.Services.Handlers
                 if (!string.IsNullOrEmpty(installerCode))
                 {
                     _logger.LogInformation("Installer code configured, reading panel configuration sections");
-                    var result = await _configService.ExecuteInConfigModeAsync(
+                    var result = await _configService.RunInConfigModeAsync(
                         sessionId, installerCode, readWrite: false,
                         async () =>
                         {
@@ -138,21 +159,8 @@ namespace NeoHub.Services.Handlers
                 await PullPartitionStatusAsync(sessionId, connection, capabilities.MaxPartitions, cancellationToken);
                 await PullZoneStatusAsync(sessionId, connection, effectiveZones, cancellationToken);
 
-                completed = true;
                 _logger.LogInformation("Panel configuration pull complete");
-            }
-            catch (OperationCanceledException)
-            {
-                _logger.LogWarning("Panel configuration pull cancelled");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during panel configuration pull");
-            }
-            finally
-            {
-                await _panelState.DispatchAsync(new InitialPullFinished(sessionId, connection, completed));
-                configLock.Release();
+                return true;
             }
         }
 

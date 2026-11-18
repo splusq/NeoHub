@@ -10,36 +10,31 @@ public class PanelConfigurationService : IPanelConfigurationService
     private readonly IMediator _mediator;
     private readonly IPanelStateService _panelState;
     private readonly ILogger<PanelConfigurationService> _logger;
+    private readonly NeoHub.Domain.IPanelOperations _operations;
 
     public PanelConfigurationService(
         IMediator mediator,
         IPanelStateService panelState,
-        ILogger<PanelConfigurationService> logger)
+        ILogger<PanelConfigurationService> logger,
+        NeoHub.Domain.IPanelOperations operations)
     {
+        _operations = operations;
         _mediator = mediator;
         _panelState = panelState;
         _logger = logger;
     }
 
-    public async Task<SectionResult> ReadAllAsync(string sessionId, string installerCode, CancellationToken ct)
+    public Task<SectionResult> ReadAllAsync(string sessionId, string installerCode, CancellationToken ct)
     {
-        var session = _panelState.GetSession(sessionId);
-        if (session == null)
-            return new(false, "Session not found");
+        if (_panelState.GetSession(sessionId) == null)
+            return Task.FromResult(new SectionResult(false, "Session not found"));
 
-        await session.ConfigLock.WaitAsync(ct);
-        try
-        {
-            return await ExecuteInConfigModeAsync(sessionId, installerCode, readWrite: false, async () =>
+        return _operations.RunAsync(sessionId, "read installer configuration", opCt =>
+            RunInConfigModeAsync(sessionId, installerCode, readWrite: false, async () =>
             {
-                await ReadSectionsAsync(sessionId, CreateSendDelegate(sessionId), ct);
+                await ReadSectionsAsync(sessionId, CreateSendDelegate(sessionId), opCt);
                 return new SectionResult(true);
-            }, ct);
-        }
-        finally
-        {
-            session.ConfigLock.Release();
-        }
+            }, opCt), ct);
     }
 
     public async Task ReadSectionsAsync(string sessionId, SendSectionRead send, CancellationToken ct)
@@ -98,7 +93,13 @@ public class PanelConfigurationService : IPanelConfigurationService
     /// then always exits. Does NOT acquire the config lock.
     /// If the panel is already in programming mode, exits first to avoid "partition busy".
     /// </summary>
-    public async Task<SectionResult> ExecuteInConfigModeAsync(
+    public Task<SectionResult> ExecuteInConfigModeAsync(
+        string sessionId, string installerCode, bool readWrite,
+        Func<Task<SectionResult>> operation, CancellationToken ct)
+        => _operations.RunAsync(sessionId, readWrite ? "installer configuration write" : "installer configuration read",
+            opCt => RunInConfigModeAsync(sessionId, installerCode, readWrite, operation, opCt), ct);
+
+    public async Task<SectionResult> RunInConfigModeAsync(
         string sessionId,
         string installerCode,
         bool readWrite,

@@ -400,10 +400,12 @@
         var zoneState = _session?.Zones.GetValueOrDefault((byte)zoneNumber);
         var statusText = zoneState is not null ? $" — {GetZoneStatusText(zoneState)}" : "";
 
+        // The dialog edits a copy; the store's configuration is never modified in place.
+        var working = _config.Clone();
         var parameters = new DialogParameters<ZoneEditDialog>
         {
             { x => x.ZoneNumber, zoneNumber },
-            { x => x.Config, _config },
+            { x => x.Config, working },
             { x => x.SessionId, _sessionId },
             { x => x.InstallerCode, _installerCode }
         };
@@ -412,6 +414,7 @@
         var result = await dialog.Result;
         if (result?.Canceled == false)
         {
+            await PanelState.DispatchAsync(new NeoHub.Domain.ConfigurationReplaced(_sessionId, working));
             _session = PanelState.GetSession(_sessionId);
             _config = _session?.Configuration;
             StateHasChanged();
@@ -425,10 +428,11 @@
         var partState = _session?.Partitions.GetValueOrDefault((byte)partitionNumber);
         var statusText = partState is not null ? $" — {FormatEnumName(partState.EffectiveStatus.ToString())}" : "";
 
+        var working = _config.Clone();
         var parameters = new DialogParameters<PartitionEditDialog>
         {
             { x => x.PartitionNumber, partitionNumber },
-            { x => x.Config, _config },
+            { x => x.Config, working },
             { x => x.SessionId, _sessionId },
             { x => x.InstallerCode, _installerCode }
         };
@@ -437,6 +441,7 @@
         var result = await dialog.Result;
         if (result?.Canceled == false)
         {
+            await PanelState.DispatchAsync(new NeoHub.Domain.ConfigurationReplaced(_sessionId, working));
             _session = PanelState.GetSession(_sessionId);
             _config = _session?.Configuration;
             StateHasChanged();
@@ -630,7 +635,7 @@
         var parameters = new DialogParameters<ConfigDiffDialog>
         {
             { x => x.Diffs, diffs },
-            { x => x.CurrentConfig, _config },
+            { x => x.CurrentConfig, _config.Clone() },
             { x => x.IncomingConfig, incoming },
             { x => x.SessionId, _sessionId },
             { x => x.InstallerCode, _installerCode ?? "" }

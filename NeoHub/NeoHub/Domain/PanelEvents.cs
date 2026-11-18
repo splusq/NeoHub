@@ -55,12 +55,19 @@ namespace NeoHub.Domain
     /// <summary>The connect-time pull is over. <paramref name="Completed"/>: it ran to the end (phase Connected).</summary>
     public sealed record InitialPullFinished(string SessionId, Guid? Connection, bool Completed) : PanelEvent(SessionId, Connection);
 
-    // ── Interim: objects still edited in place by their services (until the operations phase) ──
+    // ── Values replaced as a whole ──
 
+    /// <summary>
+    /// New installer configuration. The object is handed over: nothing may modify it afterwards
+    /// (copy it first; see <see cref="NeoHub.Services.PanelConfiguration.PanelConfigurationState"/>).
+    /// </summary>
     public sealed record ConfigurationReplaced(string SessionId, PanelConfigurationState? Configuration) : PanelEvent(SessionId);
 
-    /// <summary>The user list object was changed in place; tells subscribers to re-read it.</summary>
-    public sealed record UserListChanged(string SessionId) : PanelEvent(SessionId);
+    /// <summary>
+    /// Changes the user list. <paramref name="Update"/> must be a pure function of the current
+    /// list (it is applied by the reducer, in order with every other event).
+    /// </summary>
+    public sealed record UserListUpdated(string SessionId, Func<PanelUserListState, PanelUserListState> Update) : PanelEvent(SessionId);
 
     // ── Data carried by events ──
 
@@ -82,9 +89,4 @@ namespace NeoHub.Domain
     public sealed record ZoneChanged(string SessionId, ZoneState Zone) : PanelChange(SessionId);
     public sealed record ConfigurationCompleted(string SessionId) : PanelChange(SessionId);
 
-    /// <summary>
-    /// Interim: user labels arrived. The user list is still a mutable object owned by the user
-    /// service, so the store applies these outside the reducer.
-    /// </summary>
-    public sealed record UserLabelsReceived(string SessionId, int Start, ImmutableArray<string?> Labels) : PanelChange(SessionId);
 }
