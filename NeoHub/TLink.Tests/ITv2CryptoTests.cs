@@ -1,4 +1,5 @@
 using DSC.TLink.ITv2.Encryption;
+using DSC.TLink.Tests.Reference;
 
 namespace DSC.TLink.Tests;
 

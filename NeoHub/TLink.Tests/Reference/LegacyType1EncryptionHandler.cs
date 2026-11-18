@@ -16,7 +16,9 @@
 
 using System.Security.Cryptography;
 
-namespace DSC.TLink.ITv2.Encryption
+using DSC.TLink.ITv2;
+
+namespace DSC.TLink.Tests.Reference
 {
 	internal class Type1EncryptionHandler : EncryptionHandler
 	{
