@@ -50,4 +50,7 @@ public enum TLinkErrorCode
 
     /// <summary>Connection settings are missing or incomplete for the connecting panel.</summary>
     ConfigurationError,
+
+    /// <summary>The panel did not answer within the allowed time.</summary>
+    Timeout,
 }
