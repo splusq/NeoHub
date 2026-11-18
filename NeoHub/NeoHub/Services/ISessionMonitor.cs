@@ -1,18 +1,14 @@
 namespace NeoHub.Services
 {
-    /// <summary>
-    /// Provides session lifecycle events for UI consumption.
-    /// Backed by MediatR notifications from the TLink library.
-    /// </summary>
+    /// <summary>Signals that the set of panels or their settings changed.</summary>
     public interface ISessionMonitor
     {
-        event Action? SessionsChanged;
         void NotifyChanged();
     }
 
-    public class SessionMonitor : ISessionMonitor
+    /// <summary>Posts the signal into the state store, so it reaches subscribers in order with everything else.</summary>
+    public class SessionMonitor(IPanelStateService store) : ISessionMonitor
     {
-        public event Action? SessionsChanged;
-        public void NotifyChanged() => SessionsChanged?.Invoke();
+        public void NotifyChanged() => store.Dispatch(new Domain.SessionsListChanged());
     }
 }

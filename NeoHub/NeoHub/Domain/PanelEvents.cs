@@ -69,6 +69,9 @@ namespace NeoHub.Domain
     /// </summary>
     public sealed record UserListUpdated(string SessionId, Func<PanelUserListState, PanelUserListState> Update) : PanelEvent(SessionId);
 
+    /// <summary>The set of known panels or their connection settings changed (not a state change of one panel).</summary>
+    public sealed record SessionsListChanged() : PanelEvent("");
+
     // ── Data carried by events ──
 
     public sealed record PartitionSetup(byte Number, string? Name);
@@ -88,5 +91,8 @@ namespace NeoHub.Domain
     public sealed record PartitionChanged(string SessionId, PartitionState Partition) : PanelChange(SessionId);
     public sealed record ZoneChanged(string SessionId, ZoneState Zone) : PanelChange(SessionId);
     public sealed record ConfigurationCompleted(string SessionId) : PanelChange(SessionId);
+    public sealed record SessionsChanged() : PanelChange("");
+    /// <summary>The subscriber missed changes; re-read everything from the snapshot.</summary>
+    public sealed record Resynchronize() : PanelChange("");
 
 }

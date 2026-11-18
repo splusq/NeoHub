@@ -95,7 +95,11 @@
 
     protected override void OnInitialized()
     {
-        PanelState.PartitionStateChanged += OnPartitionStateChanged;
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            if (c is Domain.PartitionChanged or Domain.SessionRemoved or Domain.Resynchronize)
+                OnPartitionStateChanged();
+        });
 
         // Refresh UI every second for countdown and audio management
         _refreshTimer = new Timer(_ =>
@@ -111,7 +115,9 @@
         }, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
     }
 
-    private void OnPartitionStateChanged(object? sender, PartitionStateChangedEventArgs e)
+    private Domain.PanelChangeFeed? _feed;
+
+    private void OnPartitionStateChanged()
     {
         _ = SafeInvokeAsync(async () =>
         {
@@ -205,7 +211,7 @@
         _cts.Cancel();
         _refreshTimer?.Dispose();
 
-        PanelState.PartitionStateChanged -= OnPartitionStateChanged;
+        _feed?.Dispose();
         _cts.Dispose();
     }
 }

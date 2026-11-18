@@ -45,6 +45,10 @@ namespace NeoHub.Domain
                     break;
                 }
 
+                case SessionsListChanged:
+                    changes.Add(new SessionsChanged());
+                    break;
+
                 case SessionEnded ended:
                 {
                     if (sessions.TryGetValue(ended.SessionId, out var current) && current.ConnectionId == ended.Connection)

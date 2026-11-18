@@ -187,9 +187,14 @@
             new BreadcrumbItem($"Session: {SessionId}", href: null, disabled: true),
             new BreadcrumbItem(partitionDisplayName, href: null, disabled: true)
         };
-        PanelState.PartitionStateChanged += OnStateChanged;
-        PanelState.ZoneStateChanged += OnStateChanged;
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            if (c is Domain.PartitionChanged or Domain.ZoneChanged or Domain.SessionChanged or Domain.SessionRemoved or Domain.Resynchronize)
+                OnStateChanged();
+        });
     }
+
+    private Domain.PanelChangeFeed? _feed;
 
     private void LoadData()
     {
@@ -206,7 +211,7 @@
         }
     }
 
-    private void OnStateChanged(object? sender, EventArgs e)
+    private void OnStateChanged()
     {
         InvokeAsync(() =>
         {
@@ -323,8 +328,7 @@
     public void Dispose()
     {
         _cts.Cancel();
-        PanelState.PartitionStateChanged -= OnStateChanged;
-        PanelState.ZoneStateChanged -= OnStateChanged;
+        _feed?.Dispose();
         _cts.Dispose();
     }
 }

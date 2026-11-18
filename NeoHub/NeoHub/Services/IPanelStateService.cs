@@ -24,10 +24,8 @@ namespace NeoHub.Services
         /// <summary>Posts an event; completes once it is applied and subscribers have been told.</summary>
         Task DispatchAsync(Domain.PanelEvent e);
 
-        event EventHandler<SessionStateChangedEventArgs>? SessionStateChanged;
-        event EventHandler<PartitionStateChangedEventArgs>? PartitionStateChanged;
-        event EventHandler<ZoneStateChangedEventArgs>? ZoneStateChanged;
-        event EventHandler<ConfigurationCompleteEventArgs>? ConfigurationComplete;
+        /// <summary>Every change from now on, in order, through a channel of its own.</summary>
+        Domain.PanelSubscription Subscribe();
     }
 
     public class SessionStateChangedEventArgs : EventArgs

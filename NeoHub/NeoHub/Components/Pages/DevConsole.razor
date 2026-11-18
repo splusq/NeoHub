@@ -7,7 +7,7 @@
 @using MediatR
 @using System.Reflection
 @inject IITv2SessionManager SessionManager
-@inject ISessionMonitor SessionMonitor
+@inject IPanelStateService PanelState
 @inject IMediator Mediator
 @inject IDiagnosticsLogService LogService
 @inject IJSRuntime JS
@@ -196,7 +196,10 @@
     protected override void OnInitialized()
     {
         RefreshSessions();
-        SessionMonitor.SessionsChanged += OnSessionsChanged;
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            if (c is Domain.SessionsChanged or Domain.SessionRemoved or Domain.Resynchronize) OnSessionsChanged();
+        });
         LogService.LogReceived += OnLogReceived;
 
         foreach (var entry in LogService.GetLogs().TakeLast(200))
@@ -235,6 +238,8 @@
         if (_sessionId is null || !_activeSessions.Contains(_sessionId))
             _sessionId = _activeSessions.FirstOrDefault();
     }
+
+    private Domain.PanelChangeFeed? _feed;
 
     private void OnSessionsChanged()
     {
@@ -604,7 +609,7 @@
     {
         _disposed = true;
         _renderTimer?.Dispose();
-        SessionMonitor.SessionsChanged -= OnSessionsChanged;
+        _feed?.Dispose();
         LogService.LogReceived -= OnLogReceived;
     }
 }
