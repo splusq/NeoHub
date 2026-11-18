@@ -89,40 +89,6 @@ namespace DSC.TLink.ITv2.MediatR
 
         #endregion
 
-        #region Notification Publishing (Inbound from Panel)
 
-        /// <summary>
-        /// Publishes an inbound message as a typed SessionNotification&lt;T&gt;.
-        /// Called by the connection handler for each notification from the session.
-        /// MultipleMessagePacket expansion is already handled by the session.
-        /// </summary>
-        public async Task PublishNotificationAsync(string sessionId, IMessageData message)
-        {
-            try
-            {
-                var messageType = message.GetType();
-                var notificationType = typeof(SessionNotification<>).MakeGenericType(messageType);
-
-                var notification = Activator.CreateInstance(
-                    notificationType, sessionId, message, DateTime.UtcNow);
-
-                if (notification == null)
-                {
-                    _logger.LogError("Failed to create notification for type {MessageType}", messageType.Name);
-                    return;
-                }
-
-                await _mediator.Publish(notification);
-
-                _logger.LogTrace("Published SessionNotification<{MessageType}>",
-                    messageType.Name);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error publishing notification");
-            }
-        }
-
-        #endregion
     }
 }

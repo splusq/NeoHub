@@ -4,6 +4,7 @@ using DSC.TLink.ITv2.MediatR;
 using DSC.TLink.ITv2.Messages;
 using MediatR;
 using Microsoft.Extensions.Options;
+using NeoHub.Domain;
 using NeoHub.Services.Models;
 using NeoHub.Services.PanelConfiguration;
 using NeoHub.Services.Settings;
@@ -24,14 +25,17 @@ namespace NeoHub.Services.Handlers
         private readonly IPanelConfigurationService _configService;
         private readonly IOptionsMonitor<PanelConnectionsSettings> _connectionSettings;
         private readonly ILogger<PanelConfigurationHandler> _logger;
+        private readonly TimeProvider _time;
 
         public PanelConfigurationHandler(
             IMediator mediator,
             IPanelStateService panelState,
             IPanelConfigurationService configService,
             IOptionsMonitor<PanelConnectionsSettings> connectionSettings,
-            ILogger<PanelConfigurationHandler> logger)
+            ILogger<PanelConfigurationHandler> logger,
+            TimeProvider time)
         {
+            _time = time;
             _mediator = mediator;
             _panelState = panelState;
             _configService = configService;
@@ -42,16 +46,26 @@ namespace NeoHub.Services.Handlers
         public async Task Handle(SessionConnectedNotification notification, CancellationToken cancellationToken)
         {
             var sessionId = notification.SessionId;
+            // Every state change from this pull is scoped to this connection: if the panel
+            // reconnects meanwhile, the store ignores the rest of this pull.
+            Guid? connection = notification.ConnectionId == Guid.Empty ? null : notification.ConnectionId;
             _logger.LogInformation("Starting panel configuration pull");
 
-            // Ensure the session exists — it may not have been created yet
-            // since the connected notification fires early in the lifecycle.
-            _panelState.UpdateSession(sessionId, s => s.ConnectionPhase = ConnectionPhase.Handshake);
-            var session = _panelState.GetSession(sessionId)!;
+            // The connection posted "started" before it was registered, so once this is applied
+            // the session exists (unless the connection has already gone).
+            await _panelState.DispatchAsync(new ConnectionPhaseChanged(sessionId, connection, ConnectionPhase.Handshake));
+            var session = _panelState.GetSession(sessionId);
+            if (session is null || (connection is { } c && session.ConnectionId != c))
+            {
+                _logger.LogInformation("Connection already replaced or gone; skipping configuration pull");
+                return;
+            }
 
-            // Acquire the config lock for the entire initialization sequence.
-            // This prevents user-initiated operations from interleaving.
-            await session.ConfigLock.WaitAsync(cancellationToken);
+            // Acquire the config lock for the entire initialization sequence. Captured once, so
+            // the lock released is the lock acquired.
+            var configLock = session.ConfigLock;
+            await configLock.WaitAsync(cancellationToken);
+            var completed = false;
 
             try
             {
@@ -71,12 +85,8 @@ namespace NeoHub.Services.Handlers
                     "Panel capabilities: {MaxZones} zones, {MaxPartitions} partitions, {MaxUsers} users",
                     capabilities.MaxZones, capabilities.MaxPartitions, capabilities.MaxUsers);
 
-                _panelState.UpdateSession(sessionId, s =>
-                {
-                    s.MaxZones = capabilities.MaxZones;
-                    s.MaxPartitions = capabilities.MaxPartitions;
-                    s.MaxUsers = capabilities.MaxUsers;
-                });
+                await _panelState.DispatchAsync(new CapabilitiesRead(sessionId, connection,
+                    capabilities.MaxZones, capabilities.MaxPartitions, capabilities.MaxUsers));
 
                 var connectionSettings = _connectionSettings.CurrentValue.FindBySessionId(sessionId);
                 var maxZonesSetting = connectionSettings?.MaxZones ?? 0;
@@ -89,7 +99,7 @@ namespace NeoHub.Services.Handlers
                     effectiveZones, capabilities.MaxZones, maxZonesSetting > 0 ? maxZonesSetting : "unlimited");
 
                 // ── 2. Labels: installer config vs. explicit pull ──
-                _panelState.UpdateSession(sessionId, s => s.ConnectionPhase = ConnectionPhase.ReadingConfig);
+                await _panelState.DispatchAsync(new ConnectionPhaseChanged(sessionId, connection, ConnectionPhase.ReadingConfig));
                 var installerCode = connectionSettings?.InstallerCode;
                 if (!string.IsNullOrEmpty(installerCode))
                 {
@@ -103,27 +113,32 @@ namespace NeoHub.Services.Handlers
                             return new SectionResult(true);
                         }, cancellationToken);
 
-                    if (result.Success)
-                        ApplyConfigurationToSessionState(sessionId, effectiveZones, capabilities.MaxPartitions);
-                    else
+                    if (result.Success && _panelState.GetSession(sessionId)?.Configuration is { } config)
+                    {
+                        var (partitions, zones) = PanelReadings.Setup(config, effectiveZones, capabilities.MaxPartitions);
+                        await _panelState.DispatchAsync(new InstallerSetupApplied(sessionId, connection, partitions, zones));
+                        _logger.LogInformation("Applied installer config to session state: {Zones} zones, {Partitions} partitions",
+                            effectiveZones, capabilities.MaxPartitions);
+                    }
+                    else if (!result.Success)
+                    {
                         _logger.LogWarning("Installer config read failed: {Error}", result.ErrorMessage);
+                    }
                 }
 
                 // Fall back to explicit label pull if no config was read
-                session = _panelState.GetSession(sessionId)!;
-                if (session.Configuration is null)
+                if (_panelState.GetSession(sessionId)?.Configuration is null)
                 {
                     await PullZoneLabelsAsync(sessionId, effectiveZones, cancellationToken);
                     await PullPartitionLabelsAsync(sessionId, capabilities.MaxPartitions, cancellationToken);
                 }
 
                 // ── 3. Status reads (always) ──
-                _panelState.UpdateSession(sessionId, s => s.ConnectionPhase = ConnectionPhase.ReadingStatus);
-                await PullPartitionStatusAsync(sessionId, capabilities.MaxPartitions, cancellationToken);
-                await PullZoneStatusAsync(sessionId, effectiveZones, cancellationToken);
+                await _panelState.DispatchAsync(new ConnectionPhaseChanged(sessionId, connection, ConnectionPhase.ReadingStatus));
+                await PullPartitionStatusAsync(sessionId, connection, capabilities.MaxPartitions, cancellationToken);
+                await PullZoneStatusAsync(sessionId, connection, effectiveZones, cancellationToken);
 
-                _panelState.UpdateSession(sessionId, s => s.ConnectionPhase = ConnectionPhase.Connected);
-                _panelState.OnConfigurationComplete(sessionId);
+                completed = true;
                 _logger.LogInformation("Panel configuration pull complete");
             }
             catch (OperationCanceledException)
@@ -136,8 +151,8 @@ namespace NeoHub.Services.Handlers
             }
             finally
             {
-                _panelState.UpdateSession(sessionId, s => s.IsInitialized = true);
-                session.ConfigLock.Release();
+                await _panelState.DispatchAsync(new InitialPullFinished(sessionId, connection, completed));
+                configLock.Release();
             }
         }
 
@@ -151,86 +166,6 @@ namespace NeoHub.Services.Handlers
                 }, token);
                 return response.Success ? response.MessageData as SectionReadResponse : null;
             };
-
-        /// <summary>
-        /// Populates session-level PartitionState and ZoneState from the installer configuration.
-        /// Only creates entries for enabled partitions and non-null zone definitions.
-        /// </summary>
-        private void ApplyConfigurationToSessionState(string sessionId, int effectiveZones, int maxPartitions)
-        {
-            var session = _panelState.GetSession(sessionId);
-            var config = session?.Configuration;
-            if (config is null) return;
-
-            var partEnables = config.PartitionEnables.Values;
-            var partLabels = config.PartitionLabels.Values;
-
-            // Populate partition state — only enabled partitions
-            for (int p = 0; p < maxPartitions; p++)
-            {
-                if (p < partEnables.Count && partEnables[p] != PanelConfiguration.Sections.PartitionEnable.Enabled)
-                    continue;
-
-                var partNum = (byte)(p + 1);
-                var state = _panelState.GetPartition(sessionId, partNum)
-                    ?? new PartitionState { PartitionNumber = partNum };
-
-                if (p < partLabels.Count)
-                {
-                    var label = partLabels[p];
-                    if (!string.IsNullOrEmpty(label))
-                        state.Name = FormatLabelLine1(label);
-                }
-
-                _panelState.UpdatePartition(sessionId, state);
-            }
-
-            // Populate zone state — only non-null zone definitions
-            var zoneDefs = config.ZoneDefinitions.Values;
-            var zoneLabels = config.ZoneLabels.Values;
-            var assignments = config.ZoneAssignments.Values;
-
-            for (int z = 0; z < effectiveZones; z++)
-            {
-                if (z < zoneDefs.Count && zoneDefs[z] == PanelConfiguration.Sections.ZoneDefinition.NullZone)
-                    continue;
-
-                var zoneNum = (byte)(z + 1);
-                var zone = _panelState.GetZone(sessionId, zoneNum)
-                    ?? new ZoneState { ZoneNumber = zoneNum };
-
-                if (z < zoneDefs.Count)
-                    zone.Definition = zoneDefs[z];
-
-                // Labels
-                if (z < zoneLabels.Count)
-                {
-                    var label = zoneLabels[z];
-                    if (!string.IsNullOrEmpty(label))
-                    {
-                        zone.DisplayNameLine1 = label.Length >= 14 ? label[..14].TrimEnd() : label.TrimEnd();
-                        zone.DisplayNameLine2 = label.Length > 14 ? label[14..Math.Min(28, label.Length)].TrimEnd() : null;
-                    }
-                }
-
-                // Partition assignments from config
-                zone.Partitions.Clear();
-                for (int p = 0; p < maxPartitions; p++)
-                {
-                    if (p < assignments.GetLength(0) && z < assignments.GetLength(1) && assignments[p, z])
-                        zone.Partitions.Add((byte)(p + 1));
-                }
-
-                _panelState.UpdateZone(sessionId, zone);
-            }
-
-            _logger.LogInformation(
-                "Applied installer config to session state: {Zones} zones, {Partitions} partitions",
-                effectiveZones, maxPartitions);
-        }
-
-        private static string FormatLabelLine1(string label) =>
-            label.Length >= 14 ? label[..14].TrimEnd() : label.TrimEnd();
 
         private async Task PullZoneLabelsAsync(string sessionId, int maxZones, CancellationToken ct)
         {
@@ -280,10 +215,9 @@ namespace NeoHub.Services.Handlers
             _logger.LogInformation("Pulled partition labels");
         }
 
-        private async Task PullPartitionStatusAsync(string sessionId, int maxPartitions, CancellationToken ct)
+        private async Task PullPartitionStatusAsync(string sessionId, Guid? connection, int maxPartitions, CancellationToken ct)
         {
-            var config = _panelState.GetSession(sessionId)?.Configuration;
-            var partEnables = config?.PartitionEnables.Values;
+            var partEnables = _panelState.GetSession(sessionId)?.Configuration?.PartitionEnables.Values;
 
             for (int partition = 1; partition <= maxPartitions; partition++)
             {
@@ -292,6 +226,9 @@ namespace NeoHub.Services.Handlers
                     && partition - 1 < partEnables.Count
                     && partEnables[partition - 1] != PanelConfiguration.Sections.PartitionEnable.Enabled)
                     continue;
+
+                // Taken before the request: a live change after this point is newer than the reply.
+                var requestedAt = _panelState.Version;
                 var response = await RequestAsync<ModulePartitionStatus>(
                     sessionId,
                     new CommandRequestMessage
@@ -302,77 +239,24 @@ namespace NeoHub.Services.Handlers
 
                 if (response == null)
                 {
-                    _logger.LogWarning("Failed to get status for partition {Partition}",
-                        partition);
+                    _logger.LogWarning("Failed to get status for partition {Partition}", partition);
                     continue;
                 }
 
-                var partitionNumber = (byte)response.Partition;
-                var state = _panelState.GetPartition(sessionId, partitionNumber)
-                    ?? new PartitionState { PartitionNumber = partitionNumber };
-
-                var s1 = response.Status1;
-                var s2 = response.Status2;
-
-                // Map flags to status — check in priority order
-                if (s2.HasFlag(ModulePartitionStatus.PartitionStatus2.PartitionInAlarm))
-                {
-                    state.Status = PartitionStatus.Triggered;
-                }
-                else if (s1.HasFlag(ModulePartitionStatus.PartitionStatus1.EntryDelayInProgress))
-                {
-                    state.Status = PartitionStatus.Pending;
-                }
-                else if (s1.HasFlag(ModulePartitionStatus.PartitionStatus1.StayArmed))
-                {
-                    state.Status = PartitionStatus.ArmedHome;
-                }
-                else if (s1.HasFlag(ModulePartitionStatus.PartitionStatus1.NightArmed))
-                {
-                    state.Status = PartitionStatus.ArmedNight;
-                }
-                else if (s1.HasFlag(ModulePartitionStatus.PartitionStatus1.Armed))
-                {
-                    state.Status = PartitionStatus.ArmedAway;
-                }
-                else
-                {
-                    state.Status = PartitionStatus.Disarmed;
-                }
-
-                state.IsReady = !s1.HasFlag(ModulePartitionStatus.PartitionStatus1.Armed)
-                    && (s1.HasFlag(ModulePartitionStatus.PartitionStatus1.ReadyToArm)
-                        || s1.HasFlag(ModulePartitionStatus.PartitionStatus1.ReadyToForceArm));
-
-                if (s1.HasFlag(ModulePartitionStatus.PartitionStatus1.ExitDelayInProgress))
-                {
-                    if (!state.ExitDelayActive)
-                    {
-                        state.ExitDelayActive = true;
-                        state.ExitDelayStartedAt = DateTime.UtcNow;
-                    }
-                }
-                else
-                {
-                    state.ExitDelayActive = false;
-                    state.ExitDelayStartedAt = null;
-                }
-
-                state.LastUpdated = DateTime.UtcNow;
-                _panelState.UpdatePartition(sessionId, state);
-
+                var reading = PanelReadings.Partition(response);
+                await _panelState.DispatchAsync(new PartitionStatusRead(sessionId, connection, reading, requestedAt, _time.GetUtcNow()));
                 _logger.LogDebug("Partition {Partition} Status1=0x{S1:X} Status2=0x{S2:X} → {Status}, IsReady={IsReady}",
-                    partitionNumber, (byte)s1, (byte)s2, state.Status, state.IsReady);
+                    reading.Partition, (byte)response.Status1, (byte)response.Status2, reading.Status, reading.IsReady);
             }
 
             _logger.LogInformation("Pulled initial partition status");
         }
 
-        private async Task PullZoneStatusAsync(string sessionId, int maxZones, CancellationToken ct)
+        private async Task PullZoneStatusAsync(string sessionId, Guid? connection, int maxZones, CancellationToken ct)
         {
-            var config = _panelState.GetSession(sessionId)?.Configuration;
-            var zoneDefs = config?.ZoneDefinitions.Values;
+            var zoneDefs = _panelState.GetSession(sessionId)?.Configuration?.ZoneDefinitions.Values;
 
+            var requestedAt = _panelState.Version;
             var response = await RequestAsync<ModuleZoneStatus>(
                 sessionId,
                 new CommandRequestMessage
@@ -387,36 +271,9 @@ namespace NeoHub.Services.Handlers
                 return;
             }
 
-            for (int i = 0; i < response.ZoneStatusBytes.Length; i++)
-            {
-                var zoneNumber = (byte)(response.ZoneStart + i);
-                var zoneIndex = zoneNumber - 1;
-                var status = response.ZoneStatusBytes[i];
-
-                // Skip null zones when config data is available
-                if (zoneDefs is not null
-                    && zoneIndex < zoneDefs.Count
-                    && zoneDefs[zoneIndex] == PanelConfiguration.Sections.ZoneDefinition.NullZone)
-                    continue;
-
-                var zone = _panelState.GetZone(sessionId, zoneNumber)
-                    ?? new ZoneState { ZoneNumber = zoneNumber };
-
-                zone.IsOpen = status.HasFlag(ModuleZoneStatus.ZoneStatusEnum.Open);
-                zone.IsFaulted = status.HasFlag(ModuleZoneStatus.ZoneStatusEnum.Fault);
-                zone.IsTampered = status.HasFlag(ModuleZoneStatus.ZoneStatusEnum.Tamper);
-                zone.IsBypassed = status.HasFlag(ModuleZoneStatus.ZoneStatusEnum.Bypass);
-                zone.LastUpdated = DateTime.UtcNow;
-
-                // Partition assignment: keep existing if already populated by config read
-                if (!zone.Partitions.Any())
-                    zone.Partitions.Add(1);
-
-                _panelState.UpdateZone(sessionId, zone);
-            }
-
-            _logger.LogInformation("Pulled initial status for {Count} zones",
-                response.ZoneStatusBytes.Length);
+            await _panelState.DispatchAsync(new ZoneStatusRead(sessionId, connection,
+                PanelReadings.Zones(response, zoneDefs), requestedAt, _time.GetUtcNow()));
+            _logger.LogInformation("Pulled initial status for {Count} zones", response.ZoneStatusBytes.Length);
         }
 
         private async Task<T?> RequestAsync<T>(string sessionId, IMessageData request, CancellationToken ct)

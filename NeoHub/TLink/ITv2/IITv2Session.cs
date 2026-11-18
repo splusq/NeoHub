@@ -39,5 +39,5 @@ internal interface IITv2Session : IAsyncDisposable
     /// Command responses are routed internally and never appear here.
     /// MultipleMessagePackets are expanded — individual sub-messages are yielded.
     /// </summary>
-    IAsyncEnumerable<IMessageData> GetNotificationsAsync(CancellationToken ct = default);
+    IAsyncEnumerable<PanelMessage> GetNotificationsAsync(CancellationToken ct = default);
 }

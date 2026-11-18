@@ -95,7 +95,7 @@ public class PanelConnectionTests
 
         var received = new List<string>();
         await foreach (var message in panel.Connection.GetNotificationsAsync().WithCancellation(new CancellationTokenSource(PanelSimulator.Guard).Token))
-            if (message is NotificationLifestyleZoneStatus z)
+            if (message.Message is NotificationLifestyleZoneStatus z)
                 received.Add($"{z.ZoneNumber}:{z.Status}");
 
         Assert.Equal(["1:Open", "1:Restored"], received);

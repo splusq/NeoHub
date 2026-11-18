@@ -52,7 +52,7 @@ namespace DSC.TLink
 
             var settingsProvider = _serviceProvider.GetRequiredService<IConnectionSettingsProvider>();
             var loggerFactory = _serviceProvider.GetRequiredService<ILoggerFactory>();
-            var sessionMediator = _serviceProvider.GetRequiredService<SessionMediator>();
+            var sink = _serviceProvider.GetService<IPanelMessageSink>();
             var registry = _serviceProvider.GetRequiredService<PanelRegistry>();
             var time = _serviceProvider.GetRequiredService<TimeProvider>();
 
@@ -64,16 +64,13 @@ namespace DSC.TLink
                 new ConnectionConfig(ConnectionTimings.Default, RandomNumberGenerator.GetBytes(ConnectionConfig.LocalRandomLength)),
                 loggerFactory.CreateLogger<PanelConnection>());
 
-            // Notifications go to the application in arrival order, on their own loop.
-            var notifications = DeliverNotificationsAsync(panel, sessionMediator);
+            // The panel's stream goes to the application in order: started, messages, ended.
+            var started = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var delivery = DeliverAsync(panel, sink, time, started);
             try
             {
-                string sessionId;
-                try
-                {
-                    sessionId = await panel.Established;
-                }
-                catch (OperationCanceledException)
+                var sessionId = await started.Task;
+                if (sessionId is null)
                 {
                     _log.LogWarning("Panel connection ended before its handshake completed");
                     return;
@@ -93,16 +90,51 @@ namespace DSC.TLink
             finally
             {
                 await panel.Completion;
-                await notifications;
+                await delivery;
                 _log.LogInformation("TLink disconnected from {RemoteEndPoint}", connection.RemoteEndPoint);
             }
         }
 
-        private async Task DeliverNotificationsAsync(PanelConnection panel, SessionMediator mediator)
+        /// <summary>
+        /// One ordered stream per connection: "started" (before the connection is registered, so
+        /// before anything reacts to it), every notification in arrival order, then "ended".
+        /// </summary>
+        private async Task DeliverAsync(PanelConnection panel, IPanelMessageSink? sink, TimeProvider time, TaskCompletionSource<string?> started)
         {
-            await Task.Yield();
-            await foreach (var message in panel.GetNotificationsAsync())
-                await mediator.PublishNotificationAsync(panel.SessionId, message);
+            string sessionId;
+            try
+            {
+                sessionId = await panel.Established;
+            }
+            catch (OperationCanceledException)
+            {
+                started.TrySetResult(null);
+                return;
+            }
+
+            Safely(() => sink?.Started(sessionId, panel.ConnectionId, time.GetUtcNow()));
+            started.TrySetResult(sessionId);
+            try
+            {
+                await foreach (var message in panel.GetNotificationsAsync())
+                    Safely(() => sink?.Accept(message));
+            }
+            finally
+            {
+                Safely(() => sink?.Ended(sessionId, panel.ConnectionId));
+            }
+        }
+
+        private void Safely(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Panel message sink failed");
+            }
         }
 
         private static ConnectionCredentials? Credentials(ConnectionSettings? settings)
