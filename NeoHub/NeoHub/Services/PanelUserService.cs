@@ -3,15 +3,15 @@ using NeoHub.Domain;
 using System.Diagnostics;
 using DSC.TLink.ITv2;
 using DSC.TLink.ITv2.Enumerations;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
 using DSC.TLink.ITv2.Messages;
-using MediatR;
 
 namespace NeoHub.Services
 {
     public class PanelUserService : IPanelUserService
     {
-        private readonly IMediator _mediator;
+        private readonly IPanelSender _mediator;
+        private readonly TimeProvider _time;
         private readonly IPanelStateService _panelState;
         private readonly IPanelAccessCodeService _accessCodes;
         private readonly ILogger<PanelUserService> _logger;
@@ -33,11 +33,13 @@ namespace NeoHub.Services
         private static readonly int MaxLabelsPerRequest = MaxRecordsPerBatch(28, headerOverhead: 6);
 
         public PanelUserService(
-            IMediator mediator,
+            IPanelSender mediator,
             IPanelStateService panelState,
             IPanelAccessCodeService accessCodes,
-            ILogger<PanelUserService> logger)
+            ILogger<PanelUserService> logger,
+            TimeProvider? time = null)
         {
+            _time = time ?? TimeProvider.System;
             _mediator = mediator;
             _panelState = panelState;
             _accessCodes = accessCodes;
@@ -216,7 +218,7 @@ namespace NeoHub.Services
                     // On a crossing, re-read the authoritative panel state so our local copy
                     // reflects whatever the panel actually did (attrs/partitions reset, etc.).
                     var updated = crossed ? await RefreshSingleUserAsync(sessionId, user, innerCt) : user;
-                    updated = updated with { LastUpdated = DateTime.UtcNow };
+                    updated = updated with { LastUpdated = _time.GetUtcNow().UtcDateTime };
                     _panelState.Dispatch(new UserListUpdated(sessionId, l => l with { Users = l.Users.SetItem(idx, updated) }));
 
                     return new PanelUserWriteResult(true)
@@ -457,13 +459,13 @@ namespace NeoHub.Services
                     Attributes = attrs[i],
                     Partitions = parts[i].ToImmutableArray(),
                     HasProximityTag = confs[i] == UserCodeConfigurationReadResponse.UserCodeType.ProximityTag,
-                    LastUpdated = DateTime.UtcNow,
+                    LastUpdated = _time.GetUtcNow().UtcDateTime,
                 };
                 assembled[i] = state;
             }
 
             sw.Stop();
-            var readAt = DateTime.UtcNow;
+            var readAt = _time.GetUtcNow().UtcDateTime;
             _panelState.Dispatch(new UserListUpdated(sessionId, l => l with
             {
                 Users = l.Users.SetItems(assembled),

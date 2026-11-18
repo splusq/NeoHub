@@ -1,8 +1,7 @@
 using DSC.TLink.ITv2;
 using DSC.TLink.ITv2.Enumerations;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
 using DSC.TLink.ITv2.Messages;
-using MediatR;
 using Microsoft.Extensions.Options;
 using NeoHub.Domain;
 using NeoHub.Services.Models;
@@ -16,11 +15,11 @@ namespace NeoHub.Services.Handlers
     /// then either reads full installer config (if installer code is available)
     /// or falls back to explicit label pulls. Always reads partition/zone status.
     /// </summary>
-    public class PanelConfigurationHandler : INotificationHandler<SessionConnectedNotification>
+    public class PanelConfigurationHandler : IPanelLifecycleObserver
     {
         private const int MaxLabelsPerRequest = 4;
 
-        private readonly IMediator _mediator;
+        private readonly IPanelSender _mediator;
         private readonly IPanelStateService _panelState;
         private readonly IPanelConfigurationService _configService;
         private readonly IOptionsMonitor<PanelConnectionsSettings> _connectionSettings;
@@ -29,7 +28,7 @@ namespace NeoHub.Services.Handlers
         private readonly IPanelOperations _operations;
 
         public PanelConfigurationHandler(
-            IMediator mediator,
+            IPanelSender mediator,
             IPanelStateService panelState,
             IPanelConfigurationService configService,
             IOptionsMonitor<PanelConnectionsSettings> connectionSettings,
@@ -44,6 +43,31 @@ namespace NeoHub.Services.Handlers
             _configService = configService;
             _connectionSettings = connectionSettings;
             _logger = logger;
+        }
+
+        /// <summary>
+        /// Starts the pull and returns at once, so a long pull for one panel never holds up
+        /// lifecycle events for others. The pull is one queued operation for its panel, stops when
+        /// its connection ends, and its state updates are scoped to that connection.
+        /// </summary>
+        public Task OnLifecycleAsync(PanelLifecycleEvent e, CancellationToken cancellationToken)
+        {
+            if (e is SessionConnectedNotification connected)
+                _ = PullInBackgroundAsync(connected, cancellationToken);
+            return Task.CompletedTask;
+        }
+
+        private async Task PullInBackgroundAsync(SessionConnectedNotification connected, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Handle(connected, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Panel configuration pull failed");
+            }
         }
 
         public async Task Handle(SessionConnectedNotification notification, CancellationToken cancellationToken)

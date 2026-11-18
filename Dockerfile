@@ -9,6 +9,8 @@ WORKDIR /src
 # Copy project files
 COPY ["NeoHub/NeoHub/NeoHub.csproj", "NeoHub/NeoHub/"]
 COPY ["NeoHub/TLink/DSC.TLink.csproj", "NeoHub/TLink/"]
+# Shared build settings (the banned-API analyzer package is added here)
+COPY ["NeoHub/Directory.Build.props", "NeoHub/Directory.Build.targets", "NeoHub/BannedSymbols.txt", "NeoHub/"]
 
 # Restore dependencies
 RUN dotnet restore "NeoHub/NeoHub/NeoHub.csproj" -a $TARGETARCH

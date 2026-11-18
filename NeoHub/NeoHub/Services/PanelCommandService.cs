@@ -1,8 +1,7 @@
 using DSC.TLink.ITv2;
 using DSC.TLink.ITv2.Enumerations;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
 using DSC.TLink.ITv2.Messages;
-using MediatR;
 using Microsoft.Extensions.Options;
 using NeoHub.Services.Settings;
 
@@ -10,13 +9,13 @@ namespace NeoHub.Services
 {
     public class PanelCommandService : IPanelCommandService
     {
-        private readonly IMediator _mediator;
+        private readonly IPanelSender _mediator;
         private readonly ILogger<PanelCommandService> _logger;
         private readonly IOptionsMonitor<PanelConnectionsSettings> _connectionSettings;
         private readonly NeoHub.Domain.IPanelOperations _operations;
 
         public PanelCommandService(
-            IMediator mediator, 
+            IPanelSender mediator, 
             ILogger<PanelCommandService> logger,
             IOptionsMonitor<PanelConnectionsSettings> connectionSettings,
             NeoHub.Domain.IPanelOperations operations)

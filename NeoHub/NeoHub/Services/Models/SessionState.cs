@@ -67,12 +67,10 @@ namespace NeoHub.Services.Models
         /// </summary>
         public DateTime? PanelDateTimeSyncedAt { get; init; }
 
-        /// <summary>
-        /// Returns the estimated current panel time by adding elapsed time since the last sync.
-        /// </summary>
-        public DateTime? PanelDateTimeNow =>
+        /// <summary>The estimated panel time at <paramref name="nowUtc"/>: the last broadcast plus the time since.</summary>
+        public DateTime? PanelDateTimeAt(DateTime nowUtc) =>
             PanelDateTime.HasValue && PanelDateTimeSyncedAt.HasValue
-                ? PanelDateTime.Value + (DateTime.UtcNow - PanelDateTimeSyncedAt.Value)
+                ? PanelDateTime.Value + (nowUtc - PanelDateTimeSyncedAt.Value)
                 : null;
 
         public DateTime LastUpdated { get; init; }

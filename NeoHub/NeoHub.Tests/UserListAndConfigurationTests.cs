@@ -128,5 +128,6 @@ public class UserListAndConfigurationTests
         public string PersistPath { get; } = Directory.CreateTempSubdirectory("neohub-users-").FullName;
         public object GetSettings(Type settingsType) => throw new NotSupportedException();
         public Task SaveSettingsAsync(Type settingsType, object settings) => throw new NotSupportedException();
+        public Task<bool> UpdateAsync<T>(Func<T, bool> change) where T : class => throw new NotSupportedException();
     }
 }

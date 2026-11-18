@@ -2,9 +2,10 @@
 @using NeoHub.Services
 @using NeoHub.Services.Models
 @using NeoHub.Services.Settings
-@using DSC.TLink.ITv2.MediatR
+@using DSC.TLink.ITv2.Sessions
 @using DSC.TLink.ITv2.Enumerations
 @using Microsoft.Extensions.Options
+@inject TimeProvider Time
 @inject IPanelUserService UserService
 @inject IPanelUserListFileService UserListFiles
 @inject IPanelStateService PanelState
@@ -252,7 +253,7 @@
     private PanelUserReadResult? _lastResult;
     private bool _disposed;
     private bool _renderDirty;
-    private Timer? _renderTimer;
+    private ITimer? _renderTimer;
 
     /// <summary>
     /// True once an auto-read has been attempted in this page session. Prevents the auto-read
@@ -300,7 +301,7 @@
             }
         });
 
-        _renderTimer = new Timer(_ => InvokeAsync(() =>
+        _renderTimer = Time.CreateTimer(_ => InvokeAsync(() =>
         {
             if (_disposed || !_renderDirty) return;
             try
@@ -311,7 +312,7 @@
                 _ = TryAutoReadAsync();
             }
             catch (ObjectDisposedException) { }
-        }), null, 200, 200);
+        }), null, TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(200));
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -545,7 +546,7 @@
 
         try
         {
-            var fileName = $"panel-users-{_sessionId}-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var fileName = $"panel-users-{_sessionId}-{Time.GetLocalNow().DateTime:yyyyMMdd-HHmmss}.json";
             await UserListFiles.SaveToServerAsync(
                 _session.UserList, _session.MaxUsers, _session.MaxPartitions, fileName);
             Snackbar.Add($"Saved to server: {fileName}", Severity.Success);
@@ -569,7 +570,7 @@
             var bytes = UserListFiles.ExportToBytes(
                 _session.UserList, _session.MaxUsers, _session.MaxPartitions);
             var base64 = Convert.ToBase64String(bytes);
-            var fileName = $"panel-users-{_sessionId}-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var fileName = $"panel-users-{_sessionId}-{Time.GetLocalNow().DateTime:yyyyMMdd-HHmmss}.json";
             await JS.InvokeVoidAsync("downloadFile", fileName, base64, "application/json");
         }
         catch (Exception ex)

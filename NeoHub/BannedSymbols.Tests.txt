@@ -1,0 +1,12 @@
+P:System.DateTime.Now;Tests run on FakeTimeProvider or fixture timestamps
+P:System.DateTime.UtcNow;Tests run on FakeTimeProvider or fixture timestamps
+P:System.DateTimeOffset.Now;Tests run on FakeTimeProvider or fixture timestamps
+P:System.DateTimeOffset.UtcNow;Tests run on FakeTimeProvider or fixture timestamps
+P:System.Environment.TickCount;Tests must not depend on elapsed time
+P:System.Environment.TickCount64;Tests must not depend on elapsed time
+M:System.Threading.Thread.Sleep(System.Int32);Wait on a barrier or a gate, never on time
+M:System.Threading.Thread.Sleep(System.TimeSpan);Wait on a barrier or a gate, never on time
+M:System.Threading.Tasks.Task.Delay(System.Int32);Wait on a barrier or a gate, never on time
+M:System.Threading.Tasks.Task.Delay(System.Int32,System.Threading.CancellationToken);Wait on a barrier or a gate, never on time
+M:System.Threading.Tasks.Task.Delay(System.TimeSpan);Wait on a barrier or a gate, never on time
+M:System.Threading.Tasks.Task.Delay(System.TimeSpan,System.Threading.CancellationToken);Wait on a barrier or a gate, never on time

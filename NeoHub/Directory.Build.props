@@ -1,0 +1,15 @@
+<Project>
+  <!--
+    Product code: no locks, no concurrent collections, no wall clock or timers outside
+    TimeProvider. Violations are build errors (RS0030). See docs/Architecture.md.
+  -->
+  <ItemGroup Condition="'$(NeoHubBannedApis)' == 'true'">
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="3.3.4" PrivateAssets="all" />
+    <AdditionalFiles Include="$(MSBuildThisFileDirectory)BannedSymbols.txt" />
+  </ItemGroup>
+  <!-- Test projects: hang guards (WaitAsync) are fine; sleeping, delays and the wall clock are not. -->
+  <ItemGroup Condition="'$(NeoHubBannedTestApis)' == 'true'">
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="3.3.4" PrivateAssets="all" />
+    <AdditionalFiles Include="$(MSBuildThisFileDirectory)BannedSymbols.Tests.txt" />
+  </ItemGroup>
+</Project>

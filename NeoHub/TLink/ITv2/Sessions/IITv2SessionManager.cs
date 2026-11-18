@@ -1,4 +1,4 @@
-namespace DSC.TLink.ITv2.MediatR
+namespace DSC.TLink.ITv2.Sessions
 {
     /// <summary>
     /// The application's view of live panel connections. Implemented by

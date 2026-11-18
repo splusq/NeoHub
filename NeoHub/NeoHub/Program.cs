@@ -68,10 +68,10 @@ namespace NeoHub
             builder.Services.AddRazorComponents()
                 .AddInteractiveServerComponents();
 
-            // MediatR
-            builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssemblies(
-                typeof(Program).Assembly,
-                typeof(StartupExtensions).Assembly));
+            // Told about panels connecting/disconnecting, in this order: settings and the session
+            // list first, then the configuration pull (which runs in the background).
+            builder.Services.AddSingleton<DSC.TLink.ITv2.Sessions.IPanelLifecycleObserver, NeoHub.Services.Handlers.SessionLifecycleHandler>();
+            builder.Services.AddSingleton<DSC.TLink.ITv2.Sessions.IPanelLifecycleObserver, NeoHub.Services.Handlers.PanelConfigurationHandler>();
 
             // Application services
             builder.Services.AddSingleton<NeoHub.Domain.PanelStore>();

@@ -31,7 +31,7 @@ public class WebSocketHubTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _hub = new ClientHub(_store, () => _store.GetAllSessions().Keys, NullLogger<ClientHub>.Instance);
+        _hub = new ClientHub(_store, () => _store.GetAllSessions().Keys, TimeProvider.System, NullLogger<ClientHub>.Instance);
         await _hub.Ready.WaitAsync(Guard);
     }
 

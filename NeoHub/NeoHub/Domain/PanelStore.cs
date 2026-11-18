@@ -31,7 +31,7 @@ namespace NeoHub.Domain
         private readonly Task _run;
 
         // Written only by the loop; immutable, so readers always see a complete state.
-        private PanelStoreState _state = PanelStoreState.Empty;
+        private readonly DSC.TLink.Concurrency.Snapshot<PanelStoreState> _state = new(PanelStoreState.Empty);
 
         public PanelStore(ILogger<PanelStore> logger)
         {
@@ -75,13 +75,13 @@ namespace NeoHub.Domain
 
         // ── Reads (snapshot; a disconnected panel reads as absent) ──
 
-        public long Version => Volatile.Read(ref _state).Version;
+        public long Version => _state.Value.Version;
 
         public SessionState? GetSession(string sessionId)
-            => Volatile.Read(ref _state).Sessions.GetValueOrDefault(sessionId) is { ConnectionId: var c } s && c != Guid.Empty ? s : null;
+            => _state.Value.Sessions.GetValueOrDefault(sessionId) is { ConnectionId: var c } s && c != Guid.Empty ? s : null;
 
         public IReadOnlyDictionary<string, SessionState> GetAllSessions()
-            => Volatile.Read(ref _state).Sessions.Where(kv => kv.Value.ConnectionId != Guid.Empty).ToImmutableDictionary();
+            => _state.Value.Sessions.Where(kv => kv.Value.ConnectionId != Guid.Empty).ToImmutableDictionary();
 
         public PartitionState? GetPartition(string sessionId, byte partitionNumber)
             => GetSession(sessionId)?.Partitions.GetValueOrDefault(partitionNumber);
@@ -138,8 +138,8 @@ namespace NeoHub.Domain
                         case Apply apply:
                             try
                             {
-                                var (next, changes) = PanelReducer.Apply(_state, apply.Event);
-                                Volatile.Write(ref _state, next);
+                                var (next, changes) = PanelReducer.Apply(_state.Value, apply.Event);
+                                _state.Publish(next);
                                 foreach (var change in changes)
                                     Deliver(change, subscribers);
                             }
