@@ -25,6 +25,9 @@ internal interface IITv2Session : IAsyncDisposable
 {
     string SessionId { get; }
 
+    /// <summary>Cancelled when this connection ends, for any reason.</summary>
+    CancellationToken Lifetime { get; }
+
     /// <summary>
     /// Send a message and wait for the protocol+command transaction to complete.
     /// Returns the command response for command messages, or the original message for notifications.

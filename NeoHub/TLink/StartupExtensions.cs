@@ -20,6 +20,8 @@ using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.DependencyInjection;
 using DSC.TLink.ITv2;
 using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Runtime;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace DSC.TLink
 {
@@ -37,11 +39,13 @@ namespace DSC.TLink
 			// MediatR - Register TLink assembly only
 			builder.Services.AddMediatR(configuration =>
 			{
-				configuration.RegisterServicesFromAssembly(typeof(ITv2Session).Assembly);
+				configuration.RegisterServicesFromAssembly(typeof(PanelRegistry).Assembly);
 			});
 
 			// Singleton services (shared across all connections)
-			builder.Services.AddSingleton<IITv2SessionManager, ITv2SessionManager>();
+			builder.Services.TryAddSingleton(TimeProvider.System);
+			builder.Services.AddSingleton<PanelRegistry>();
+			builder.Services.AddSingleton<IITv2SessionManager>(sp => sp.GetRequiredService<PanelRegistry>());
 			builder.Services.AddSingleton<SessionMediator>();
 			builder.Services.AddSingleton<ITv2ConnectionHandler>();
 			builder.Services.AddHostedService<SessionShutdownService>();

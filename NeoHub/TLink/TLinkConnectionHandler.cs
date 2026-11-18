@@ -14,14 +14,22 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+using System.Security.Cryptography;
 using DSC.TLink.ITv2;
 using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Protocol;
+using DSC.TLink.ITv2.Runtime;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace DSC.TLink
 {
+    /// <summary>
+    /// Kestrel entry point for a panel's TCP connection. Starts a <see cref="PanelConnection"/>,
+    /// registers it once its handshake succeeds, hands its notifications to the application,
+    /// and unregisters it when it ends. Owns no protocol state itself.
+    /// </summary>
     internal class ITv2ConnectionHandler : ConnectionHandler
     {
         private readonly IServiceProvider _serviceProvider;
@@ -42,52 +50,64 @@ namespace DSC.TLink
         {
             _log.LogInformation("Connection request from {RemoteEndPoint}", connection.RemoteEndPoint);
 
+            var settingsProvider = _serviceProvider.GetRequiredService<IConnectionSettingsProvider>();
+            var loggerFactory = _serviceProvider.GetRequiredService<ILoggerFactory>();
+            var sessionMediator = _serviceProvider.GetRequiredService<SessionMediator>();
+            var registry = _serviceProvider.GetRequiredService<PanelRegistry>();
+            var time = _serviceProvider.GetRequiredService<TimeProvider>();
+
+            var transport = new TLinkTransport(connection.Transport, loggerFactory.CreateLogger<TLinkTransport>());
+            var panel = PanelConnection.Start(
+                transport,
+                (sessionId, encryption) => Credentials(settingsProvider.ResolveConnection(sessionId, encryption)),
+                time,
+                new ConnectionConfig(ConnectionTimings.Default, RandomNumberGenerator.GetBytes(ConnectionConfig.LocalRandomLength)),
+                loggerFactory.CreateLogger<PanelConnection>());
+
+            // Notifications go to the application in arrival order, on their own loop.
+            var notifications = DeliverNotificationsAsync(panel, sessionMediator);
             try
             {
-                var settingsProvider = _serviceProvider.GetRequiredService<IConnectionSettingsProvider>();
-                var loggerFactory = _serviceProvider.GetRequiredService<ILoggerFactory>();
-                var sessionMediator = _serviceProvider.GetRequiredService<SessionMediator>();
-                var sessionManager = _serviceProvider.GetRequiredService<IITv2SessionManager>();
-
-                var result = await ITv2Session.CreateAsync(
-                    connection.Transport, settingsProvider, loggerFactory, connection.ConnectionClosed);
-
-                if (result.IsFailure)
+                string sessionId;
+                try
                 {
-                    _log.LogError("Session failed to initialize: {Error}", result.Error);
+                    sessionId = await panel.Established;
+                }
+                catch (OperationCanceledException)
+                {
+                    _log.LogWarning("Panel connection ended before its handshake completed");
                     return;
                 }
 
-                await using var session = result.Value;
-
-                using var sessionScope = _log.BeginScope(
-                    CreateLogScope(session.SessionId));
-
-                sessionManager.RegisterSession(session.SessionId, session);
+                using var scope = _log.BeginScope(CreateLogScope(sessionId));
+                registry.Register(panel);
                 try
                 {
-                    await foreach (var message in session.GetNotificationsAsync(connection.ConnectionClosed))
-                    {
-                        await sessionMediator.PublishNotificationAsync(session.SessionId, message);
-                    }
+                    await panel.Completion;
                 }
                 finally
                 {
-                    sessionManager.UnregisterSession(session.SessionId, session);
+                    registry.Unregister(panel);
                 }
-            }
-            catch (OperationCanceledException) when (connection.ConnectionClosed.IsCancellationRequested)
-            {
-                _log.LogInformation("Connection cancelled");
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "ITv2 connection error");
             }
             finally
             {
+                await panel.Completion;
+                await notifications;
                 _log.LogInformation("TLink disconnected from {RemoteEndPoint}", connection.RemoteEndPoint);
             }
         }
+
+        private async Task DeliverNotificationsAsync(PanelConnection panel, SessionMediator mediator)
+        {
+            await Task.Yield();
+            await foreach (var message in panel.GetNotificationsAsync())
+                await mediator.PublishNotificationAsync(panel.SessionId, message);
+        }
+
+        private static ConnectionCredentials? Credentials(ConnectionSettings? settings)
+            => settings is null
+                ? null
+                : new ConnectionCredentials(settings.EncryptionType, settings.IntegrationAccessCodeType1, settings.IntegrationAccessCodeType2);
     }
 }
