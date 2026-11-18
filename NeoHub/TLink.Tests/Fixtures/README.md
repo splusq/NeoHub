@@ -20,10 +20,9 @@ One file per panel connection, `connection-NN.jsonl`. Each line is one event, in
 `frame` is the complete ITv2 packet as hex: `[length 1–2 B][sender seq][receiver seq][command 2 B][payload][CRC16]`,
 exactly what `ITv2Session` encrypts or decrypts. Encrypted wire bytes and TLink headers are not included.
 
-`roundTrips` says whether today's codec (`MessageFactory`) re-encodes the decoded message to the
-same bytes. It is `false` for `NotificationDateTimeBroadcast`, `ProgrammingLeadInOut`, and combined
-packets that contain one: the codec drops the 5-byte panel timestamp at the end of these. That is a
-known codec bug, tracked by `CodecGoldenTests.KnownLossyTypes_AreExactlyTheDocumentedOnes`.
+`roundTrips` says whether the codec (`MessageFactory`) re-encodes the decoded message to the same
+bytes. It is `true` for every captured frame; `CodecGoldenTests.EveryCapturedFrame_RoundTrips`
+keeps it that way.
 
 ## What's in connection-01
 

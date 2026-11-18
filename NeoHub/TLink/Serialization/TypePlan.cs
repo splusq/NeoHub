@@ -56,6 +56,8 @@ namespace DSC.TLink.Serialization
         public int FixedLength { get; init; }
         public int LengthPrefixBytes { get; init; }
         public DateTimeFormatType DateTimeFormat { get; init; }
+        /// <summary>For <see cref="SerializerKind.CompactInteger"/>: minimum value bytes written.</summary>
+        public int CompactMinBytes { get; init; } = 1;
         public bool IsNullable { get; init; }
         public BitFieldGroupPlan? BitFieldGroup { get; init; }
     }

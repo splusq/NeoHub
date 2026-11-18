@@ -96,7 +96,7 @@ namespace DSC.TLink.Serialization
                         break;
 
                     case SerializerKind.CompactInteger:
-                        CompactIntegerSerializer.Write(bytes, pp.Property.PropertyType, pp.Property.GetValue(instance));
+                        CompactIntegerSerializer.Write(bytes, pp.Property.PropertyType, pp.Property.GetValue(instance), pp.CompactMinBytes);
                         break;
 
                     case SerializerKind.UnicodeString:
@@ -162,6 +162,11 @@ namespace DSC.TLink.Serialization
                             PrimitiveSerializer.WriteEnum(bytes, pp.TypeCode, element);
                         break;
                     }
+
+                    case SerializerKind.DateTime:
+                        // Was missing: DateTime fields were read but silently dropped on write.
+                        DateTimeSerializer.Write(bytes, pp.DateTimeFormat, pp.Property.GetValue(instance), pp.IsNullable);
+                        break;
 
                     case SerializerKind.MultipleMessagePacket:
                         MultipleMessagePacketSerializer.Write(bytes, pp.Property.GetValue(instance) as IMessageData[]);
@@ -417,6 +422,8 @@ namespace DSC.TLink.Serialization
                     Property = property,
                     Kind = SerializerKind.CompactInteger,
                     TypeCode = Type.GetTypeCode(propType),
+                    CompactMinBytes = property.GetCustomAttributes(typeof(CompactIntegerAttribute), false)
+                        .Cast<CompactIntegerAttribute>().First().MinBytes,
                 };
             }
 
