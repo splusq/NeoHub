@@ -46,26 +46,16 @@ public class CodecGoldenTests
     }
 
     /// <summary>
-    /// Today's codec drops the 5-byte panel timestamp at the end of these messages (and changes
-    /// one ProgrammingLeadInOut field), so they don't re-encode to what the panel sent. This
-    /// test documents exactly which types are lossy; the redesign's codec should make it empty.
+    /// Every packet the panel sent or NeoHub sent re-encodes to exactly the captured bytes.
+    /// (This caught two codec bugs: DateTime fields were never written, and the panel sends
+    /// some user-number fields two bytes wide even when the value fits in one.)
     /// </summary>
     [Fact]
-    public void KnownLossyTypes_AreExactlyTheDocumentedOnes()
+    public void EveryCapturedFrame_RoundTrips()
     {
-        var lossy = CapturedTraffic.AllPackets()
-            .Where(p => p.Record.RoundTrips == false)
-            .Select(p => p.Record.Type!)
-            .ToHashSet();
-
-        Assert.Subset(new HashSet<string> { "NotificationDateTimeBroadcast", "ProgrammingLeadInOut", "MultipleMessagePacket" }, lossy);
-
-        foreach (var (file, record) in CapturedTraffic.AllPackets().Where(p => p.Record.RoundTrips == false))
-        {
-            var (sender, receiver, message) = CapturedTraffic.Decode(record.FrameBytes);
-            Assert.False(record.FrameBytes.AsSpan().SequenceEqual(CapturedTraffic.Encode(sender, receiver, message)),
-                $"{file} {record} now round-trips: update the fixture flag and this test");
-        }
+        var notExact = CapturedTraffic.AllPackets().Where(p => p.Record.RoundTrips != true).ToList();
+        Assert.True(notExact.Count == 0,
+            "Frames the codec can't reproduce: " + string.Join(", ", notExact.Select(p => $"{p.File} {p.Record}")));
     }
 
     [Fact]

@@ -10,7 +10,8 @@ namespace DSC.TLink.ITv2.Messages
         public int Partition { get; set; }
         public ArmingMode ArmMode { get; set; }
         public ArmDisarmMethod Method { get; set; }
-        [CompactInteger]
+        // The panel always sends this two bytes wide ([02 00 01] for user 1).
+        [CompactInteger(MinBytes = 2)]
         public int UserId { get; set; }
         public enum ArmDisarmMethod : byte
         {
