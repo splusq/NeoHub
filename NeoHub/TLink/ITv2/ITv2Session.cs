@@ -44,29 +44,11 @@ internal sealed class ITv2Session : IITv2Session
     private readonly IConnectionSettingsProvider _settingsProvider;
     private readonly ILogger<ITv2Session> _logger;
     private readonly Channel<IMessageData> _notificationChannel;
-
-    // Cancelled when the session ends for any reason (transport closed, END_SESSION, dispose).
-    // Never disposed, so Lifetime stays safe to read from any thread at any time.
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly CancellationTokenSource _shutdownCts = new();
 
-    // Serializes everything written to the wire: sequence numbers, encryption and the pipe.
-    // The receive pump's acks take it too; PipeWriter and the AES instance are single-writer.
-    private readonly SemaphoreSlim _writeLock = new(1, 1);
-
-    // One command transaction in flight at a time. Panel replies are matched partly by
-    // command type, so two concurrent requests of the same type could swap replies.
-    // Notifications (e.g. the heartbeat poll) are matched by sequence number and skip the gate.
-    private readonly SemaphoreSlim _transactionGate = new(1, 1);
-
-    // Pending receivers for outbound messages awaiting responses. Mutated by senders and
-    // the receive pump; every access holds _receiversLock.
-    private readonly object _receiversLock = new();
+    // Pending receivers for outbound messages awaiting responses
     private readonly List<IMessageReceiver> _pendingReceivers = new();
-
-    private readonly ITv2SessionTimings _timings;
-
-    private Task _receivePump = Task.CompletedTask;
-    private Task _heartbeat = Task.CompletedTask;
 
     // Sequence state
     private byte _localSequence = 1;
@@ -81,15 +63,15 @@ internal sealed class ITv2Session : IITv2Session
     private IDisposable? _sessionScope;
 
     // Session readiness — panels blast buffered messages on connect;
-    // we ack them but discard notifications until the burst subsides (ReadyQuietPeriod with
-    // no traffic). A panel that never goes quiet is declared ready after MaxReadyWait anyway,
-    // otherwise every send would wait forever.
-    private readonly TaskCompletionSource _sessionReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly Timer _readyTimer;
-    private long _readyWaitStartedTicks;
+    // we ack them but discard notifications until the burst subsides.
+    private readonly TaskCompletionSource _sessionReady = new();
+    private Timer? _readyTimer;
 
     // Liveness — a half-open TCP connection (panel lost power or its link dropped) is
     // otherwise never noticed. Any inbound packet proves the panel is alive.
+    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(100);
+    private static readonly TimeSpan HeartbeatAckTimeout = TimeSpan.FromSeconds(30);
+    private const int MaxMissedHeartbeats = 3;
     private long _lastReceiveTicks = Environment.TickCount64;
 
     private int _disposed;
@@ -97,10 +79,8 @@ internal sealed class ITv2Session : IITv2Session
     private ITv2Session(
         ITLinkTransport transport,
         IConnectionSettingsProvider settingsProvider,
-        ILogger<ITv2Session> logger,
-        ITv2SessionTimings? timings = null)
+        ILogger<ITv2Session> logger)
     {
-        _timings = timings ?? ITv2SessionTimings.Default;
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
         _settingsProvider = settingsProvider ?? throw new ArgumentNullException(nameof(settingsProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -111,21 +91,16 @@ internal sealed class ITv2Session : IITv2Session
             SingleWriter = true
         });
 
-        // The callback only completes the TCS; the timer is disposed once, in DisposeAsync,
-        // so the receive pump can never call Change on a timer disposed under it.
         _readyTimer = new Timer(_ =>
         {
-            if (_sessionReady.TrySetResult())
-                _logger.LogInformation("Session ready — initial message burst complete");
+            _logger.LogInformation("Session ready — initial message burst complete");
+            _sessionReady.TrySetResult();
+            _readyTimer?.Dispose();
+            _readyTimer = null;
         });
-
-        Lifetime = _shutdownCts.Token;
     }
 
     public string SessionId { get; private set; } = string.Empty;
-
-    /// <inheritdoc />
-    public CancellationToken Lifetime { get; }
 
     #region Factory + Handshake
 
@@ -142,49 +117,16 @@ internal sealed class ITv2Session : IITv2Session
         var transport = new TLinkTransport(pipe, loggerFactory.CreateLogger<TLinkTransport>());
         var session = new ITv2Session(transport, settingsProvider, loggerFactory.CreateLogger<ITv2Session>());
 
-        Result handshakeResult;
-        using (var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
-        {
-            handshakeCts.CancelAfter(session._timings.HandshakeTimeout);
-            handshakeResult = await session.PerformHandshakeAsync(handshakeCts.Token);
-        }
-
+        var handshakeResult = await session.PerformHandshakeAsync(ct);
         if (handshakeResult.IsFailure)
-        {
-            await session.DisposeAsync();
             return Result<ITv2Session>.Fail(handshakeResult.Error!.Value);
-        }
 
         session._logger.LogInformation("Session connected successfully");
-        session.Start();
+
+        _ = session.ReceivePumpAsync();
+        _ = session.HeartbeatLoopAsync();
+
         return session;
-    }
-
-    /// <summary>
-    /// Builds a session over an already-established transport, skipping the handshake.
-    /// Only for tests: no encryption, session ID supplied by the caller.
-    /// </summary>
-    internal static ITv2Session CreateForTesting(
-        ITLinkTransport transport, string sessionId, ILoggerFactory loggerFactory, ITv2SessionTimings? timings = null)
-    {
-        var session = new ITv2Session(transport, new NoSettingsProvider(), loggerFactory.CreateLogger<ITv2Session>(), timings)
-        {
-            SessionId = sessionId
-        };
-        session.Start();
-        return session;
-    }
-
-    private sealed class NoSettingsProvider : IConnectionSettingsProvider
-    {
-        public ConnectionSettings? ResolveConnection(string sessionId, EncryptionType encryptionType) => null;
-        public void ConfirmDefaults(string sessionId) { }
-    }
-
-    private void Start()
-    {
-        _receivePump = ReceivePumpAsync();
-        _heartbeat = HeartbeatLoopAsync();
     }
 
     private async Task<Result> PerformHandshakeAsync(CancellationToken ct)
@@ -286,54 +228,33 @@ internal sealed class ITv2Session : IITv2Session
 
     public async Task<Result<IMessageData>> SendAsync(IMessageData message, CancellationToken ct = default)
     {
-        if (Volatile.Read(ref _disposed) != 0 || Lifetime.IsCancellationRequested)
-            return Result<IMessageData>.Fail(TLinkErrorCode.Disconnected, "Session is closed");
-
-        // One deadline covers waiting for readiness, waiting for our turn, and the reply.
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, Lifetime);
-        linkedCts.CancelAfter(_timings.CommandTimeout);
-
-        bool isTransaction = message is ICommandMessage;
-        bool holdsGate = false;
-        try
-        {
-            await _sessionReady.Task.WaitAsync(linkedCts.Token);
-
-            if (isTransaction)
-            {
-                await _transactionGate.WaitAsync(linkedCts.Token);
-                holdsGate = true;
-            }
-
-            return await SendMessageAsync(message, linkedCts.Token);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            // The caller's own cancellation still throws; ours becomes a result.
-            if (Lifetime.IsCancellationRequested)
-                return Result<IMessageData>.Fail(TLinkErrorCode.Disconnected,
-                    $"Session closed before the panel answered {message.GetType().Name}");
-
-            _logger.LogWarning("No reply to {MessageType} within {Timeout}", message.GetType().Name, _timings.CommandTimeout);
-            return Result<IMessageData>.Fail(TLinkErrorCode.Timeout,
-                $"The panel did not answer {message.GetType().Name} within {_timings.CommandTimeout.TotalSeconds:0}s");
-        }
-        finally
-        {
-            if (holdsGate)
-                _transactionGate.Release();
-        }
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdownCts.Token);
+        await _sessionReady.Task.WaitAsync(linkedCts.Token);
+        return await SendMessageAsync(message, linkedCts.Token);
     }
 
     public async IAsyncEnumerable<IMessageData> GetNotificationsAsync(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        // The stream ends when the channel completes (transport closed, END_SESSION, heartbeat
-        // gave up, or dispose). It is not tied to Lifetime, so notifications already queued
-        // when the panel hangs up are still delivered.
+        if (Volatile.Read(ref _disposed) != 0)
+            yield break;
+
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdownCts.Token);
         var reader = _notificationChannel.Reader;
-        while (await reader.WaitToReadAsync(ct))
+        while (true)
         {
+            // A session shut down from our side (replaced by a reconnect, END_SESSION, or
+            // disposal) ends the stream cleanly; only the caller's own token throws.
+            try
+            {
+                if (!await reader.WaitToReadAsync(linkedCts.Token))
+                    yield break;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                yield break;
+            }
+
             while (reader.TryRead(out var notification))
                 yield return notification;
         }
@@ -345,15 +266,14 @@ internal sealed class ITv2Session : IITv2Session
 
     private async Task ReceivePumpAsync()
     {
-        var ct = Lifetime;
+        var ct = _shutdownCts.Token;
         try
         {
-            Interlocked.Exchange(ref _readyWaitStartedTicks, Environment.TickCount64);
-            RestartReadyTimer();
+            _readyTimer!.Change(TimeSpan.FromSeconds(2), Timeout.InfiniteTimeSpan);
 
             await foreach (var tlinkResult in _transport.ReadAllAsync(ct))
             {
-                RestartReadyTimer();
+                _readyTimer?.Change(TimeSpan.FromSeconds(2), Timeout.InfiniteTimeSpan);
 
                 if (tlinkResult.IsFailure)
                 {
@@ -382,11 +302,15 @@ internal sealed class ITv2Session : IITv2Session
                 if (packet.Message is ConnectionEndSession)
                 {
                     _logger.LogInformation("Received END_SESSION from panel, shutting down");
+                    _shutdownCts.Cancel();
                     break;
                 }
 
-                if (TryRouteToReceiver(r => r.TryReceive(packet)))
+                if (_pendingReceivers.Any(receiver => receiver.TryReceive(packet)))
+                {
+                    CleanupCompletedReceivers();
                     continue;
+                }
 
                 // Discard unsolicited notifications during the initial message burst
                 if (!_sessionReady.Task.IsCompleted)
@@ -397,7 +321,7 @@ internal sealed class ITv2Session : IITv2Session
                 }
 
                 // Session is ready — publish as notification(s)
-                PublishNotifications(packet);
+                await PublishNotificationsAsync(packet, ct);
             }
 
             _logger.LogInformation("Transport completed");
@@ -412,73 +336,15 @@ internal sealed class ITv2Session : IITv2Session
         }
         finally
         {
-            // Whatever ended the pump, the session is over: stop the heartbeat, fail pending
-            // sends, and end the notification stream once it drains.
             _notificationChannel.Writer.TryComplete();
-            _shutdownCts.Cancel();
         }
-    }
-
-    /// <summary>
-    /// (Re)arms the readiness timer: ready after a quiet period, but no later than MaxReadyWait
-    /// after the pump started.
-    /// </summary>
-    private void RestartReadyTimer()
-    {
-        if (_sessionReady.Task.IsCompleted)
-            return;
-
-        var elapsed = TimeSpan.FromMilliseconds(Environment.TickCount64 - Interlocked.Read(ref _readyWaitStartedTicks));
-        var remaining = _timings.MaxReadyWait - elapsed;
-        var due = remaining <= TimeSpan.Zero
-            ? TimeSpan.Zero
-            : (remaining < _timings.ReadyQuietPeriod ? remaining : _timings.ReadyQuietPeriod);
-
-        try
-        {
-            _readyTimer.Change(due, Timeout.InfiniteTimeSpan);
-        }
-        catch (ObjectDisposedException)
-        {
-            // Disposed concurrently; the session is shutting down.
-        }
-    }
-
-    /// <summary>
-    /// Offers an inbound message to the pending receivers, first match wins. Completed
-    /// receivers are skipped so a timed-out request can't swallow a later reply.
-    /// </summary>
-    private bool TryRouteToReceiver(Func<IMessageReceiver, bool> tryReceive)
-    {
-        lock (_receiversLock)
-        {
-            foreach (var receiver in _pendingReceivers)
-            {
-                if (!receiver.IsCompleted && tryReceive(receiver))
-                    return true;
-            }
-            return false;
-        }
-    }
-
-    private void AddReceiver(IMessageReceiver receiver)
-    {
-        lock (_receiversLock)
-            _pendingReceivers.Add(receiver);
-    }
-
-    private void RemoveReceiver(IMessageReceiver receiver)
-    {
-        lock (_receiversLock)
-            _pendingReceivers.Remove(receiver);
-        receiver.Dispose();
     }
 
     /// <summary>
     /// Publish an inbound message (or expanded multi-message sub-messages) as notifications.
     /// Embedded command responses are routed to pending receivers instead of published.
     /// </summary>
-    private void PublishNotifications(ITv2Packet packet)
+    private async Task PublishNotificationsAsync(ITv2Packet packet, CancellationToken ct)
     {
         if (packet.Message is MultipleMessagePacket multiMsg)
         {
@@ -486,21 +352,27 @@ internal sealed class ITv2Session : IITv2Session
 
             foreach (var subMessage in multiMsg.Messages)
             {
-                if (TryRouteToReceiver(r => r.TryReceiveSubMessage(subMessage)))
+                if (_pendingReceivers.Any(r => r.TryReceiveSubMessage(subMessage)))
                 {
                     _logger.LogDebug("Routed sub-message to pending receiver: {MessageType}", subMessage.GetType().Name);
+                    CleanupCompletedReceivers();
                     continue;
                 }
 
                 _logger.LogDebug("Publishing notification: {MessageType}", subMessage.GetType().Name);
-                _notificationChannel.Writer.TryWrite(subMessage);
+                await _notificationChannel.Writer.WriteAsync(subMessage, ct);
             }
         }
         else
         {
             _logger.LogDebug("Publishing notification: {MessageType}", packet.Message.GetType().Name);
-            _notificationChannel.Writer.TryWrite(packet.Message);
+            await _notificationChannel.Writer.WriteAsync(packet.Message, ct);
         }
+    }
+
+    private void CleanupCompletedReceivers()
+    {
+        _pendingReceivers.RemoveAll(r => r.IsCompleted);
     }
 
     #endregion
@@ -511,15 +383,17 @@ internal sealed class ITv2Session : IITv2Session
     /// Send a message and wait for the transaction to complete.
     /// For notifications: waits for SimpleAck, returns null.
     /// For commands: waits for command response (sync or async), returns the response.
-    ///
-    /// The write lock covers only building and writing the packet, not the wait for the reply,
-    /// so the receive pump (which needs it to ack) keeps running while we wait.
+    /// 
+    /// The send lock protects only the send operation, not the response await.
+    /// This allows the receive pump to process other messages while we wait.
     /// </summary>
     private async Task<Result<IMessageData>> SendMessageAsync(IMessageData message, CancellationToken ct)
     {
         IMessageReceiver receiver;
 
-        await _writeLock.WaitAsync(ct);
+        // Lock only protects building/sending the packet and registering the receiver.
+        // The response await happens outside the lock.
+        await _sendLock.WaitAsync(ct);
         try
         {
             var senderSeq = GetNextLocalSequence();
@@ -544,52 +418,29 @@ internal sealed class ITv2Session : IITv2Session
                 receiver = MessageReceiver.CreateNotificationReceiver(senderSeq);
             }
 
-            // Registered before the write so a fast reply can't arrive unmatched.
-            AddReceiver(receiver);
+            _pendingReceivers.Add(receiver);
 
             var packet = new ITv2Packet(senderSeq, _remoteSequence, message);
-            var sendResult = await WritePacketLockedAsync(packet, ct);
+            var sendResult = await SendPacketAsync(packet, ct);
 
             if (sendResult.IsFailure)
             {
-                RemoveReceiver(receiver);
+                receiver.Dispose();
+                _pendingReceivers.Remove(receiver);
                 return Result<IMessageData>.Fail(sendResult.Error!.Value);
             }
         }
         finally
         {
-            _writeLock.Release();
+            _sendLock.Release();
         }
 
-        try
-        {
-            var response = await receiver.Result(ct);
-            return Result<IMessageData>.Ok(response ?? message);
-        }
-        finally
-        {
-            // Always deregister: a receiver left behind after a timeout would otherwise
-            // match (and swallow) the reply meant for the next request.
-            RemoveReceiver(receiver);
-        }
+        // Await response outside the lock so heartbeats and other sends aren't blocked
+        var response = await receiver.Result(ct);
+        return Result<IMessageData>.Ok(response ?? message);
     }
 
-    /// <summary>Writes one packet, taking the write lock.</summary>
     private async Task<Result> SendPacketAsync(ITv2Packet packet, CancellationToken ct)
-    {
-        await _writeLock.WaitAsync(ct);
-        try
-        {
-            return await WritePacketLockedAsync(packet, ct);
-        }
-        finally
-        {
-            _writeLock.Release();
-        }
-    }
-
-    /// <summary>Writes one packet. The caller must hold <see cref="_writeLock"/>.</summary>
-    private async Task<Result> WritePacketLockedAsync(ITv2Packet packet, CancellationToken ct)
     {
         var plaintext = SerializePacket(packet);
 
@@ -603,16 +454,8 @@ internal sealed class ITv2Session : IITv2Session
 
     private async Task SendSimpleAckAsync(byte remoteSenderSeq, CancellationToken ct)
     {
-        await _writeLock.WaitAsync(ct);
-        try
-        {
-            var ack = new ITv2Packet(_localSequence, remoteSenderSeq, new SimpleAck());
-            await WritePacketLockedAsync(ack, ct);
-        }
-        finally
-        {
-            _writeLock.Release();
-        }
+        var ack = new ITv2Packet(_localSequence, remoteSenderSeq, new SimpleAck());
+        await SendPacketAsync(ack, ct);
     }
 
     private async Task<ITv2Packet> ReceivePacketAsync(CancellationToken ct)
@@ -712,7 +555,7 @@ internal sealed class ITv2Session : IITv2Session
 
     private async Task HeartbeatLoopAsync()
     {
-        var ct = Lifetime;
+        var ct = _shutdownCts.Token;
         try
         {
             await _sessionReady.Task.WaitAsync(ct);
@@ -720,13 +563,13 @@ internal sealed class ITv2Session : IITv2Session
             int missed = 0;
             while (!ct.IsCancellationRequested)
             {
-                await Task.Delay(_timings.HeartbeatInterval, ct);
+                await Task.Delay(HeartbeatInterval, ct);
 
                 long sentAt = Environment.TickCount64;
                 bool acked;
                 using (var pollCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
                 {
-                    pollCts.CancelAfter(_timings.HeartbeatAckTimeout);
+                    pollCts.CancelAfter(HeartbeatAckTimeout);
                     try
                     {
                         acked = (await SendAsync(new ConnectionPoll(), pollCts.Token)).IsSuccess;
@@ -747,15 +590,14 @@ internal sealed class ITv2Session : IITv2Session
                 }
 
                 missed++;
-                _logger.LogWarning("Panel did not answer heartbeat ({Missed}/{Max})", missed, _timings.MaxMissedHeartbeats);
+                _logger.LogWarning("Panel did not answer heartbeat ({Missed}/{Max})", missed, MaxMissedHeartbeats);
 
-                if (missed >= _timings.MaxMissedHeartbeats)
+                if (missed >= MaxMissedHeartbeats)
                 {
                     _logger.LogWarning("Panel unresponsive; closing session so it can reconnect");
                     // Ending the notification stream lets the connection handler unregister
                     // and dispose this session, which closes the socket.
                     _notificationChannel.Writer.TryComplete();
-                    _shutdownCts.Cancel();
                     return;
                 }
             }
@@ -781,23 +623,15 @@ internal sealed class ITv2Session : IITv2Session
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
 
-        // Say goodbye while the transport is still up. Bounded: a dead peer must not stall dispose.
-        if (_sessionReady.Task.IsCompletedSuccessfully && !Lifetime.IsCancellationRequested)
+        if (_sessionReady.Task.IsCompletedSuccessfully)
         {
             try
             {
-                using var cts = new CancellationTokenSource(_timings.DisposeTimeout);
-                await _writeLock.WaitAsync(cts.Token);
-                try
-                {
-                    var packet = new ITv2Packet(GetNextLocalSequence(), _remoteSequence, new ConnectionEndSession());
-                    await WritePacketLockedAsync(packet, cts.Token);
-                    _logger.LogInformation("END_SESSION sent");
-                }
-                finally
-                {
-                    _writeLock.Release();
-                }
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                var senderSeq = GetNextLocalSequence();
+                var packet = new ITv2Packet(senderSeq, _remoteSequence, new ConnectionEndSession());
+                await SendPacketAsync(packet, cts.Token);
+                _logger.LogInformation("END_SESSION sent");
             }
             catch (Exception ex)
             {
@@ -805,39 +639,23 @@ internal sealed class ITv2Session : IITv2Session
             }
         }
 
-        // Stops the pump and heartbeat, and fails every send that is still waiting.
         _shutdownCts.Cancel();
+
+        _readyTimer?.Dispose();
         _notificationChannel.Writer.TryComplete();
-        _readyTimer.Dispose();
 
-        List<IMessageReceiver> pending;
-        lock (_receiversLock)
-        {
-            pending = new List<IMessageReceiver>(_pendingReceivers);
-            _pendingReceivers.Clear();
-        }
-        foreach (var receiver in pending)
+        foreach (var receiver in _pendingReceivers)
             receiver.Dispose();
+        _pendingReceivers.Clear();
 
-        // Let the pump and heartbeat observe cancellation before the pipe is completed under
-        // them (PipeReader/PipeWriter are not safe to complete during a pending operation).
-        await Task.WhenAny(Task.WhenAll(_receivePump, _heartbeat), Task.Delay(_timings.DisposeTimeout));
+        _sendLock.Dispose();
+        _shutdownCts.Dispose();
+        _encryption?.Dispose();
+        _sessionScope?.Dispose();
 
-        // A sender that was mid-write holds the lock; wait (bounded) so encryption and the
-        // transport aren't torn down under it. Never disposed itself, so late waiters are safe.
-        bool gotWriteLock = await _writeLock.WaitAsync(_timings.DisposeTimeout);
-        try
-        {
-            _encryption?.Dispose();
-            await _transport.DisposeAsync();
-        }
-        finally
-        {
-            if (gotWriteLock)
-                _writeLock.Release();
-            _sessionScope?.Dispose();
-        }
+        await _transport.DisposeAsync();
     }
 
     #endregion
 }
+

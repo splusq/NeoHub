@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
@@ -10,24 +11,17 @@ using NeoHub.Services.PanelConfiguration.Sections;
 namespace NeoHub.Api.WebSocket
 {
     /// <summary>
-    /// Manages WebSocket connections for Home Assistant / Homebridge integration.
+    /// Manages WebSocket connections for Home Assistant integration.
     /// Pushes partition and zone updates in real-time.
-    ///
-    /// Concurrency: state-change events arrive on several threads. Each event is serialized
-    /// once, synchronously, and queued to every client's <see cref="WebSocketClient"/>, whose
-    /// single send loop writes them in order. Nothing here calls WebSocket.SendAsync directly.
     /// </summary>
     public class PanelWebSocketHandler
     {
-        /// <summary>Largest client message accepted; requests are a few hundred bytes.</summary>
-        internal const int MaxInboundMessageBytes = 64 * 1024;
-
         private readonly IPanelStateService _panelState;
         private readonly IPanelCommandService _commandService;
         private readonly IITv2SessionManager _sessionManager;
         private readonly ISessionMonitor _sessionMonitor;
         private readonly ILogger<PanelWebSocketHandler> _logger;
-        private readonly ConcurrentDictionary<string, WebSocketClient> _clients = new();
+        private readonly ConcurrentBag<System.Net.WebSockets.WebSocket> _connectedClients = new();
 
         public PanelWebSocketHandler(
             IPanelStateService panelState,
@@ -50,8 +44,6 @@ namespace NeoHub.Api.WebSocket
             _panelState.ConfigurationComplete += OnConfigurationComplete;
         }
 
-        internal int ClientCount => _clients.Count;
-
         public async Task HandleConnectionAsync(HttpContext context)
         {
             if (!context.WebSockets.IsWebSocketRequest)
@@ -63,25 +55,15 @@ namespace NeoHub.Api.WebSocket
             }
 
             var webSocket = await context.WebSockets.AcceptWebSocketAsync();
-            await RunClientAsync(webSocket, context.Connection.RemoteIpAddress?.ToString(), context.RequestAborted);
-        }
-
-        /// <summary>
-        /// Serves one accepted socket until it closes. Separate from the HTTP plumbing so it can
-        /// be driven directly in tests.
-        /// </summary>
-        internal async Task RunClientAsync(System.Net.WebSockets.WebSocket webSocket, string? remoteIp, CancellationToken ct)
-        {
             var clientId = Guid.NewGuid().ToString("N")[..8];
-            var client = new WebSocketClient(clientId, webSocket, _logger);
-            _clients[clientId] = client;
-
+            _connectedClients.Add(webSocket);
+            
             _logger.LogInformation("WebSocket client {ClientId} connected from {RemoteIp}. Total clients: {Count}",
-                clientId, remoteIp, _clients.Count);
+                clientId, context.Connection.RemoteIpAddress, _connectedClients.Count);
 
             try
             {
-                await ReceiveMessagesAsync(client, ct);
+                await ReceiveMessagesAsync(webSocket, clientId);
             }
             catch (Exception ex)
             {
@@ -89,83 +71,59 @@ namespace NeoHub.Api.WebSocket
             }
             finally
             {
-                // Remove this client (not an arbitrary one), then drain and close it.
-                _clients.TryRemove(new KeyValuePair<string, WebSocketClient>(clientId, client));
-                await client.DisposeAsync();
+                _connectedClients.TryTake(out _);
                 _logger.LogInformation("WebSocket client {ClientId} disconnected. Total clients: {Count}",
-                    clientId, _clients.Count);
+                    clientId, _connectedClients.Count);
+                
+                if (webSocket.State == WebSocketState.Open)
+                    await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None);
             }
         }
 
-        private async Task ReceiveMessagesAsync(WebSocketClient client, CancellationToken ct)
+        private async Task ReceiveMessagesAsync(System.Net.WebSockets.WebSocket webSocket, string clientId)
         {
-            var webSocket = client.Socket;
             var buffer = new byte[4096];
-            using var message = new MemoryStream();
+            var segment = new ArraySegment<byte>(buffer);
 
             try
             {
                 while (webSocket.State == WebSocketState.Open)
                 {
-                    var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                    var result = await webSocket.ReceiveAsync(segment, CancellationToken.None);
 
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        // The close reply is sent by WebSocketClient.DisposeAsync after its send
-                        // loop has finished, so it never overlaps a queued send.
-                        _logger.LogDebug("Client {ClientId} sent close frame", client.Id);
+                        _logger.LogDebug("Client {ClientId} sent close frame", clientId);
+                        await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed by client", CancellationToken.None);
                         break;
                     }
-
-                    // Messages may arrive in several frames; assemble before parsing.
-                    message.Write(buffer, 0, result.Count);
-                    if (message.Length > MaxInboundMessageBytes)
-                    {
-                        _logger.LogWarning("Client {ClientId} sent a message over {Max} bytes; disconnecting it",
-                            client.Id, MaxInboundMessageBytes);
-                        webSocket.Abort();
-                        break;
-                    }
-
-                    if (!result.EndOfMessage)
-                        continue;
 
                     if (result.MessageType == WebSocketMessageType.Text)
                     {
-                        var json = Encoding.UTF8.GetString(message.GetBuffer(), 0, (int)message.Length);
-                        _logger.LogTrace("Client {ClientId} ← {Json}", client.Id, json);
-                        await ProcessMessageAsync(client, json);
+                        var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                        _logger.LogTrace("Client {ClientId} ← {Json}", clientId, json);
+                        await ProcessMessageAsync(webSocket, json, clientId);
                     }
-                    message.SetLength(0);
                 }
             }
             catch (WebSocketException ex) when (ex.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
             {
                 // Client disconnected abruptly (network drop, browser close, etc.)
                 // This is normal behavior, not an error
-                _logger.LogDebug("Client {ClientId} disconnected without close handshake", client.Id);
-            }
-            catch (WebSocketException) when (client.IsAborted)
-            {
-                // We aborted it (too slow, or a send failed); already logged.
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                // Host shutting down or request aborted.
+                _logger.LogDebug("Client {ClientId} disconnected without close handshake", clientId);
             }
         }
 
-        private async Task ProcessMessageAsync(WebSocketClient client, string json)
+        private async Task ProcessMessageAsync(System.Net.WebSockets.WebSocket webSocket, string json, string clientId)
         {
-            var clientId = client.Id;
             try
             {
                 var message = JsonSerializer.Deserialize<WebSocketMessage>(json, _jsonOptions);
-
+                
                 if (message == null)
                 {
                     _logger.LogWarning("Client {ClientId} sent null message", clientId);
-                    SendError(client, "Invalid message");
+                    await SendErrorAsync(webSocket, "Invalid message", clientId);
                     return;
                 }
 
@@ -174,48 +132,48 @@ namespace NeoHub.Api.WebSocket
                 switch (message)
                 {
                     case GetFullStateMessage:
-                        Send(client, BuildFullState(clientId));
+                        await SendFullStateAsync(webSocket, clientId);
                         break;
 
                     case ArmAwayMessage armAway:
-                        await HandleArmCommandAsync(client, armAway, DSC.TLink.ITv2.Enumerations.ArmingMode.AwayArm);
+                        await HandleArmCommandAsync(webSocket, armAway, DSC.TLink.ITv2.Enumerations.ArmingMode.AwayArm, clientId);
                         break;
 
                     case ArmHomeMessage armHome:
-                        await HandleArmCommandAsync(client, armHome, DSC.TLink.ITv2.Enumerations.ArmingMode.StayArm);
+                        await HandleArmCommandAsync(webSocket, armHome, DSC.TLink.ITv2.Enumerations.ArmingMode.StayArm, clientId);
                         break;
 
                     case ArmNightMessage armNight:
-                        await HandleArmCommandAsync(client, armNight, DSC.TLink.ITv2.Enumerations.ArmingMode.NightArm);
+                        await HandleArmCommandAsync(webSocket, armNight, DSC.TLink.ITv2.Enumerations.ArmingMode.NightArm, clientId);
                         break;
 
                     case DisarmMessage disarm:
-                        await HandleDisarmCommandAsync(client, disarm);
+                        await HandleDisarmCommandAsync(webSocket, disarm, clientId);
                         break;
 
                     case BypassZoneMessage bypassZone:
-                        await HandleBypassZoneCommandAsync(client, bypassZone);
+                        await HandleBypassZoneCommandAsync(webSocket, bypassZone, clientId);
                         break;
 
                     default:
                         _logger.LogWarning("Client {ClientId} sent unknown message type: {MessageType}", clientId, message.GetType().Name);
-                        SendError(client, $"Unknown message type: {message.GetType().Name}");
+                        await SendErrorAsync(webSocket, $"Unknown message type: {message.GetType().Name}", clientId);
                         break;
                 }
             }
             catch (JsonException ex)
             {
                 _logger.LogError(ex, "Client {ClientId} sent invalid JSON: {Json}", clientId, json);
-                SendError(client, $"Invalid JSON: {ex.Message}");
+                await SendErrorAsync(webSocket, $"Invalid JSON: {ex.Message}", clientId);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error processing message from client {ClientId}: {Json}", clientId, json);
-                SendError(client, $"Processing error: {ex.Message}");
+                await SendErrorAsync(webSocket, $"Processing error: {ex.Message}", clientId);
             }
         }
 
-        private FullStateMessage BuildFullState(string clientId)
+        private async Task SendFullStateAsync(System.Net.WebSockets.WebSocket webSocket, string clientId)
         {
             var sessions = _sessionManager.GetActiveSessions()
                 .Where(sessionId => !string.IsNullOrWhiteSpace(sessionId))
@@ -244,8 +202,7 @@ namespace NeoHub.Api.WebSocket
                                 DeviceClass = DetermineDeviceClass(kvp.Value),
                                 Open = kvp.Value.IsOpen,
                                 Bypassed = kvp.Value.IsBypassed,
-                                // Copy: the DTO is serialized later, the list is shared state.
-                                Partitions = kvp.Value.Partitions.ToList()
+                                Partitions = kvp.Value.Partitions
                             })
                             .ToList()
                     };
@@ -259,45 +216,59 @@ namespace NeoHub.Api.WebSocket
                 sessions.Sum(s => s.Partitions.Count),
                 sessions.Sum(s => s.Zones.Count));
 
-            return new FullStateMessage { Sessions = sessions };
+            var message = new FullStateMessage { Sessions = sessions };
+            await SendMessageAsync(webSocket, message, clientId);
         }
 
         private async Task HandleArmCommandAsync(
-            WebSocketClient client,
+            System.Net.WebSockets.WebSocket webSocket, 
             ArmCommandMessage command, 
-            DSC.TLink.ITv2.Enumerations.ArmingMode mode)
+            DSC.TLink.ITv2.Enumerations.ArmingMode mode, 
+            string clientId)
         {
             _logger.LogInformation("Client {ClientId} → {Command}: Session={SessionId}, Partition={Partition}",
-                client.Id, command.GetType().Name, command.SessionId, command.PartitionNumber);
+                clientId, command.GetType().Name, command.SessionId, command.PartitionNumber);
 
             var result = await _commandService.ArmAsync(command.SessionId, command.PartitionNumber, mode, command.Code);
 
             if (!result.Success)
-                SendError(client, result.ErrorMessage ?? "Command failed");
+            {
+                await SendErrorAsync(webSocket, result.ErrorMessage ?? "Command failed", clientId);
+            }
         }
 
-        private async Task HandleDisarmCommandAsync(WebSocketClient client, DisarmMessage command)
+        private async Task HandleDisarmCommandAsync(
+            System.Net.WebSockets.WebSocket webSocket, 
+            DisarmMessage command, 
+            string clientId)
         {
             _logger.LogInformation("Client {ClientId} → {Command}: Session={SessionId}, Partition={Partition}",
-                client.Id, command.GetType().Name, command.SessionId, command.PartitionNumber);
+                clientId, command.GetType().Name, command.SessionId, command.PartitionNumber);
 
             var result = await _commandService.DisarmAsync(command.SessionId, command.PartitionNumber, command.Code);
 
             if (!result.Success)
-                SendError(client, result.ErrorMessage ?? "Command failed");
+            {
+                await SendErrorAsync(webSocket, result.ErrorMessage ?? "Command failed", clientId);
+            }
         }
 
-        private async Task HandleBypassZoneCommandAsync(WebSocketClient client, BypassZoneMessage command)
+        private async Task HandleBypassZoneCommandAsync(
+            System.Net.WebSockets.WebSocket webSocket,
+            BypassZoneMessage command,
+            string clientId)
         {
             _logger.LogInformation(
                 "Client {ClientId} → bypass_zone: Session={SessionId}, Partition={Partition}, Zone={Zone}, Bypass={Bypass}",
-                client.Id, command.SessionId, command.PartitionNumber, command.ZoneNumber, command.Bypass);
+                clientId, command.SessionId, command.PartitionNumber, command.ZoneNumber, command.Bypass);
 
             var result = await _commandService.BypassZoneAsync(
                 command.SessionId, command.PartitionNumber, command.ZoneNumber, command.Bypass, command.Code);
 
             if (!result.Success)
-                SendError(client, result.ErrorMessage ?? "Bypass command failed");
+            {
+                await SendErrorAsync(webSocket, result.ErrorMessage ?? "Bypass command failed", clientId);
+            }
         }
 
         private static readonly JsonSerializerOptions _jsonOptions = new()
@@ -306,40 +277,52 @@ namespace NeoHub.Api.WebSocket
             Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) }
         };
 
-        /// <summary>Serializes as the base type so the [JsonPolymorphic] discriminator is emitted.</summary>
-        private static byte[] Serialize(WebSocketMessage message)
-            => JsonSerializer.SerializeToUtf8Bytes<WebSocketMessage>(message, _jsonOptions);
-
-        private void Send(WebSocketClient client, WebSocketMessage message)
+        private async Task SendMessageAsync(System.Net.WebSockets.WebSocket webSocket, WebSocketMessage message, string clientId)
         {
-            var bytes = Serialize(message);
-            if (_logger.IsEnabled(LogLevel.Trace))
-                _logger.LogTrace("Client {ClientId} → {MessageType}: {Json}", client.Id, message.GetType().Name, Encoding.UTF8.GetString(bytes));
-            client.TryEnqueue(bytes);
+            if (webSocket.State != WebSocketState.Open)
+            {
+                _logger.LogTrace("Skipping send to client {ClientId} (state: {State})", clientId, webSocket.State);
+                return;
+            }
+
+            // Serialize as the base type so the [JsonPolymorphic] discriminator is emitted
+            var json = JsonSerializer.Serialize<WebSocketMessage>(message, _jsonOptions);
+
+            _logger.LogTrace("Client {ClientId} → {MessageType}: {Json}", clientId, message.GetType().Name, json);
+
+            var maxByteCount = Encoding.UTF8.GetMaxByteCount(json.Length);
+            var rentedBuffer = ArrayPool<byte>.Shared.Rent(maxByteCount);
+            try
+            {
+                var byteCount = Encoding.UTF8.GetBytes(json, 0, json.Length, rentedBuffer, 0);
+                await webSocket.SendAsync(new ArraySegment<byte>(rentedBuffer, 0, byteCount), WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rentedBuffer);
+            }
         }
 
-        private void SendError(WebSocketClient client, string errorMessage)
+        private async Task SendErrorAsync(System.Net.WebSockets.WebSocket webSocket, string errorMessage, string clientId)
         {
-            _logger.LogWarning("Client {ClientId} → error: {Message}", client.Id, errorMessage);
-            Send(client, new ErrorMessage { Message = errorMessage });
+            _logger.LogWarning("Client {ClientId} → error: {Message}", clientId, errorMessage);
+            await SendMessageAsync(webSocket, new ErrorMessage { Message = errorMessage }, clientId);
         }
 
         #region Event Handlers (broadcast to all clients)
 
-        // Each handler builds and serializes its message synchronously, on the thread that raised
-        // the event, so every client's queue sees events in the order they were applied.
-
         private void OnSessionsChanged()
         {
-            _logger.LogDebug("Session list changed, broadcasting full_state to {Count} clients", _clients.Count);
-            BroadcastFullState();
+            _logger.LogDebug("Session list changed, broadcasting full_state to {Count} clients", 
+                _connectedClients.Count(c => c.State == WebSocketState.Open));
+            _ = BroadcastFullStateAsync();
         }
 
         private void OnConfigurationComplete(object? sender, ConfigurationCompleteEventArgs e)
         {
             _logger.LogInformation("Configuration complete for session {SessionId}, broadcasting full_state to {Count} clients",
-                e.SessionId, _clients.Count);
-            BroadcastFullState();
+                e.SessionId, _connectedClients.Count(c => c.State == WebSocketState.Open));
+            _ = BroadcastFullStateAsync();
         }
 
         private void OnPartitionChanged(object? sender, PartitionStateChangedEventArgs e)
@@ -353,12 +336,14 @@ namespace NeoHub.Api.WebSocket
             _logger.LogDebug("Broadcasting partition_update: Session={SessionId}, Partition={Partition}, Status={Status}",
                 e.SessionId, e.Partition.PartitionNumber, e.Partition.EffectiveStatus);
 
-            Broadcast(new PartitionUpdateMessage
+            var message = new PartitionUpdateMessage
             {
                 SessionId = e.SessionId,
                 PartitionNumber = e.Partition.PartitionNumber,
                 Status = e.Partition.EffectiveStatus
-            });
+            };
+
+            _ = BroadcastMessageAsync(message);
         }
 
         private void OnZoneChanged(object? sender, ZoneStateChangedEventArgs e)
@@ -372,35 +357,50 @@ namespace NeoHub.Api.WebSocket
             _logger.LogDebug("Broadcasting zone_update: Session={SessionId}, Zone={Zone}, Open={Open}, Bypassed={Bypassed}",
                 e.SessionId, e.Zone.ZoneNumber, e.Zone.IsOpen, e.Zone.IsBypassed);
 
-            Broadcast(new ZoneUpdateMessage
+            var message = new ZoneUpdateMessage
             {
                 SessionId = e.SessionId,
                 ZoneNumber = e.Zone.ZoneNumber,
                 Open = e.Zone.IsOpen,
                 Bypassed = e.Zone.IsBypassed
-            });
+            };
+
+            _ = BroadcastMessageAsync(message);
         }
 
-        private void BroadcastFullState()
+        private async Task BroadcastFullStateAsync()
         {
-            if (_clients.IsEmpty)
-                return;
-            Broadcast(BuildFullState("broadcast"));
-        }
+            var openClients = _connectedClients.Where(c => c.State == WebSocketState.Open).ToList();
+            _logger.LogTrace("Broadcasting full_state to {Count} clients", openClients.Count);
 
-        private void Broadcast(WebSocketMessage message)
-        {
-            try
+            foreach (var client in openClients)
             {
-                var bytes = Serialize(message);
-                _logger.LogTrace("Broadcasting {MessageType} to {Count} clients", message.GetType().Name, _clients.Count);
-                foreach (var client in _clients.Values)
-                    client.TryEnqueue(bytes);
+                try
+                {
+                    await SendFullStateAsync(client, "broadcast");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error broadcasting full state to client");
+                }
             }
-            catch (Exception ex)
+        }
+
+        private async Task BroadcastMessageAsync(WebSocketMessage message)
+        {
+            var openClients = _connectedClients.Where(c => c.State == WebSocketState.Open).ToList();
+            _logger.LogTrace("Broadcasting {MessageType} to {Count} clients", message.GetType().Name, openClients.Count);
+
+            foreach (var client in openClients)
             {
-                // Event handlers run on the panel's notification path; never let one throw into it.
-                _logger.LogError(ex, "Error broadcasting {MessageType}", message.GetType().Name);
+                try
+                {
+                    await SendMessageAsync(client, message, "broadcast");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error broadcasting {MessageType} to client", message.GetType().Name);
+                }
             }
         }
 

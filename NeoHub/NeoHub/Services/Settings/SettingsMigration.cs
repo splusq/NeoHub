@@ -76,7 +76,7 @@ public static class SettingsMigration
             if (dirty)
             {
                 var options = new JsonSerializerOptions { WriteIndented = true };
-                AtomicFile.WriteAllText(filePath, rootObj.ToJsonString(options));
+                File.WriteAllText(filePath, rootObj.ToJsonString(options));
                 Console.WriteLine($"[SettingsMigration] Migrated settings in {filePath}");
             }
         }

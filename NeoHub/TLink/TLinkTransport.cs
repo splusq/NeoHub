@@ -36,26 +36,13 @@ internal class TLinkTransport : ITLinkTransport
 
     #region Inbound
 
-    /// <summary>
-    /// Largest number of bytes buffered while looking for a frame delimiter. Real frames are a
-    /// few hundred bytes; beyond this the stream is garbage, so it is dropped to resynchronize
-    /// instead of buffering without limit. Must stay well below the input pipe's pause
-    /// threshold (64 KB for a default Pipe, 1 MB for Kestrel), or the writer pauses before
-    /// the reader ever sees enough bytes to drop them.
-    /// </summary>
-    internal const int MaxFrameBytes = 16 * 1024;
-
     public async IAsyncEnumerable<Result<TLinkMessage>> ReadAllAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
             var result = await ReadMessageAsync(cancellationToken);
-
-            // A malformed frame has already been consumed; the next 0x7F resynchronizes the
-            // stream, so yield the error and keep reading. Only a closed or cancelled
-            // connection ends the stream.
-            if (result.IsFailure && result.Error!.Value.Code is TLinkErrorCode.Disconnected or TLinkErrorCode.Cancelled)
+            if (result.IsFailure)
                 yield break;
 
             yield return result;
@@ -105,14 +92,6 @@ internal class TLinkTransport : ITLinkTransport
                     }
 
                     return parseResult;
-                }
-
-                if (buffer.Length > MaxFrameBytes)
-                {
-                    _logger.LogWarning("Dropping {Bytes} bytes with no frame delimiter", buffer.Length);
-                    buffer = buffer.Slice(buffer.End);
-                    return Result<TLinkMessage>.Fail(TLinkErrorCode.FramingError,
-                        $"No frame delimiter within {MaxFrameBytes} bytes");
                 }
             }
             finally

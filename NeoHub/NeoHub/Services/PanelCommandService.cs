@@ -13,24 +13,15 @@ namespace NeoHub.Services
         private readonly IMediator _mediator;
         private readonly ILogger<PanelCommandService> _logger;
         private readonly IOptionsMonitor<PanelConnectionsSettings> _connectionSettings;
-        private readonly IPanelStateService _panelState;
-
-        /// <summary>
-        /// How long a bypass waits for another programming-mode operation (the connect-time
-        /// configuration pull, a user-code change) to finish before giving up.
-        /// </summary>
-        internal static readonly TimeSpan ProgrammingLockTimeout = TimeSpan.FromSeconds(30);
 
         public PanelCommandService(
             IMediator mediator, 
             ILogger<PanelCommandService> logger,
-            IOptionsMonitor<PanelConnectionsSettings> connectionSettings,
-            IPanelStateService panelState)
+            IOptionsMonitor<PanelConnectionsSettings> connectionSettings)
         {
             _mediator = mediator;
             _logger = logger;
             _connectionSettings = connectionSettings;
-            _panelState = panelState;
         }
 
         private ConnectionSettings? GetConnection(string sessionId) =>
@@ -91,29 +82,6 @@ namespace NeoHub.Services
                 partition, zoneNumber, bypass,
                 string.IsNullOrEmpty(accessCode) && !string.IsNullOrEmpty(conn?.DefaultAccessCode));
 
-            // Enter → write → exit must not interleave with another programming-mode sequence
-            // (the configuration pull or a user-code change) on the same panel.
-            var programmingLock = _panelState.GetConfigLock(sessionId);
-            if (!await programmingLock.WaitAsync(ProgrammingLockTimeout))
-            {
-                _logger.LogWarning("Bypass failed: the panel stayed busy with another programming operation for {Timeout}",
-                    ProgrammingLockTimeout);
-                return PanelCommandResult.Error("The panel is busy with another programming operation; try again shortly");
-            }
-
-            try
-            {
-                return await BypassInProgrammingModeAsync(sessionId, partition, zoneNumber, bypass, code);
-            }
-            finally
-            {
-                programmingLock.Release();
-            }
-        }
-
-        private async Task<PanelCommandResult> BypassInProgrammingModeAsync(
-            string sessionId, byte partition, byte zoneNumber, bool bypass, string code)
-        {
             var enterResult = await SendCommandAsync(sessionId, new ConfigurationEnter
             {
                 Partition = partition,

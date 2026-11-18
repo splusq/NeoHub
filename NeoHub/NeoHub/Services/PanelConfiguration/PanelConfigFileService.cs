@@ -186,7 +186,7 @@ public class PanelConfigFileService : IPanelConfigFileService
 
         var path = Path.Combine(_configDir, Path.GetFileName(fileName));
         var bytes = ExportToBytes(config);
-        await AtomicFile.WriteAllBytesAsync(path, bytes);
+        await File.WriteAllBytesAsync(path, bytes);
         _logger.LogInformation("Saved panel config to {Path}", path);
     }
 
