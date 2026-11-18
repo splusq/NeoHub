@@ -42,6 +42,18 @@ namespace NeoHub.Services.Handlers
         public async Task Handle(SessionConnectedNotification notification, CancellationToken cancellationToken)
         {
             var sessionId = notification.SessionId;
+
+            // Tied to this connection: if the panel reconnects (or drops) mid-pull, stop instead
+            // of sending the rest of the pull to, and writing state for, the new connection.
+            using var pullCts = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken, notification.ConnectionLifetime);
+            var ct = pullCts.Token;
+            if (ct.IsCancellationRequested)
+            {
+                _logger.LogInformation("Connection already ended; skipping configuration pull");
+                return;
+            }
+
             _logger.LogInformation("Starting panel configuration pull");
 
             // Ensure the session exists — it may not have been created yet
@@ -50,16 +62,21 @@ namespace NeoHub.Services.Handlers
             var session = _panelState.GetSession(sessionId)!;
 
             // Acquire the config lock for the entire initialization sequence.
-            // This prevents user-initiated operations from interleaving.
-            await session.ConfigLock.WaitAsync(cancellationToken);
+            // This prevents user-initiated operations from interleaving. Captured once: the
+            // lock released must be the lock acquired, even if `session` is re-read below.
+            var configLock = _panelState.GetConfigLock(sessionId);
+            bool lockHeld = false;
 
             try
             {
+                await configLock.WaitAsync(ct);
+                lockHeld = true;
+
                 // ── 1. Capabilities ──
                 var capabilities = await RequestAsync<ConnectionSystemCapabilities>(
                     sessionId,
                     new CommandRequestMessage { Request = new ConnectionSystemCapabilities() },
-                    cancellationToken);
+                    ct);
 
                 if (capabilities == null)
                 {
@@ -99,9 +116,9 @@ namespace NeoHub.Services.Handlers
                         async () =>
                         {
                             await _configService.ReadSectionsAsync(
-                                sessionId, CreateSendDelegate(sessionId), cancellationToken);
+                                sessionId, CreateSendDelegate(sessionId), ct);
                             return new SectionResult(true);
-                        }, cancellationToken);
+                        }, ct);
 
                     if (result.Success)
                         ApplyConfigurationToSessionState(sessionId, effectiveZones, capabilities.MaxPartitions);
@@ -113,18 +130,23 @@ namespace NeoHub.Services.Handlers
                 session = _panelState.GetSession(sessionId)!;
                 if (session.Configuration is null)
                 {
-                    await PullZoneLabelsAsync(sessionId, effectiveZones, cancellationToken);
-                    await PullPartitionLabelsAsync(sessionId, capabilities.MaxPartitions, cancellationToken);
+                    await PullZoneLabelsAsync(sessionId, effectiveZones, ct);
+                    await PullPartitionLabelsAsync(sessionId, capabilities.MaxPartitions, ct);
                 }
 
                 // ── 3. Status reads (always) ──
                 _panelState.UpdateSession(sessionId, s => s.ConnectionPhase = ConnectionPhase.ReadingStatus);
-                await PullPartitionStatusAsync(sessionId, capabilities.MaxPartitions, cancellationToken);
-                await PullZoneStatusAsync(sessionId, effectiveZones, cancellationToken);
+                await PullPartitionStatusAsync(sessionId, capabilities.MaxPartitions, ct);
+                await PullZoneStatusAsync(sessionId, effectiveZones, ct);
 
+                ct.ThrowIfCancellationRequested();
                 _panelState.UpdateSession(sessionId, s => s.ConnectionPhase = ConnectionPhase.Connected);
                 _panelState.OnConfigurationComplete(sessionId);
                 _logger.LogInformation("Panel configuration pull complete");
+            }
+            catch (OperationCanceledException) when (notification.ConnectionLifetime.IsCancellationRequested)
+            {
+                _logger.LogInformation("Panel configuration pull stopped: the connection it was for has ended");
             }
             catch (OperationCanceledException)
             {
@@ -136,10 +158,23 @@ namespace NeoHub.Services.Handlers
             }
             finally
             {
-                _panelState.UpdateSession(sessionId, s => s.IsInitialized = true);
-                session.ConfigLock.Release();
+                // A superseded pull must not mark the new connection initialized; its own pull will.
+                if (!notification.ConnectionLifetime.IsCancellationRequested)
+                    _panelState.UpdateSession(sessionId, s => s.IsInitialized = true);
+                if (lockHeld)
+                    configLock.Release();
             }
         }
+
+        /// <summary>
+        /// The status pull's reply describes the panel at the moment the request was sent, but it
+        /// is applied later, on another thread from the live notification handlers. If a live
+        /// notification updated the entity after the request went out, the reply is older than
+        /// what we have, so applying it would undo that change (a door that just closed shows
+        /// open again until its next change).
+        /// </summary>
+        internal static bool ShouldApplyPulledStatus(DateTime? lastUpdated, DateTime requestedAt)
+            => lastUpdated is null || lastUpdated.Value <= requestedAt;
 
         private SendSectionRead CreateSendDelegate(string sessionId) =>
             async (request, token) =>
@@ -149,6 +184,9 @@ namespace NeoHub.Services.Handlers
                     SessionID = sessionId,
                     MessageData = request
                 }, token);
+                // SessionMediator turns cancellation into a failed response; stop the pull
+                // rather than carrying on against (or for) a connection that has ended.
+                token.ThrowIfCancellationRequested();
                 return response.Success ? response.MessageData as SectionReadResponse : null;
             };
 
@@ -213,13 +251,15 @@ namespace NeoHub.Services.Handlers
                     }
                 }
 
-                // Partition assignments from config
-                zone.Partitions.Clear();
+                // Partition assignments from config. Built then swapped in, never mutated in
+                // place: the UI and WebSocket snapshot may be enumerating the current list.
+                var zonePartitions = new List<byte>();
                 for (int p = 0; p < maxPartitions; p++)
                 {
                     if (p < assignments.GetLength(0) && z < assignments.GetLength(1) && assignments[p, z])
-                        zone.Partitions.Add((byte)(p + 1));
+                        zonePartitions.Add((byte)(p + 1));
                 }
+                zone.Partitions = zonePartitions;
 
                 _panelState.UpdateZone(sessionId, zone);
             }
@@ -292,6 +332,8 @@ namespace NeoHub.Services.Handlers
                     && partition - 1 < partEnables.Count
                     && partEnables[partition - 1] != PanelConfiguration.Sections.PartitionEnable.Enabled)
                     continue;
+
+                var requestedAt = DateTime.UtcNow;
                 var response = await RequestAsync<ModulePartitionStatus>(
                     sessionId,
                     new CommandRequestMessage
@@ -308,8 +350,14 @@ namespace NeoHub.Services.Handlers
                 }
 
                 var partitionNumber = (byte)response.Partition;
-                var state = _panelState.GetPartition(sessionId, partitionNumber)
-                    ?? new PartitionState { PartitionNumber = partitionNumber };
+                var existing = _panelState.GetPartition(sessionId, partitionNumber);
+                if (!ShouldApplyPulledStatus(existing?.LastUpdated, requestedAt))
+                {
+                    _logger.LogDebug("Partition {Partition} changed while its status was being read; keeping the live state",
+                        partitionNumber);
+                    continue;
+                }
+                var state = existing ?? new PartitionState { PartitionNumber = partitionNumber };
 
                 var s1 = response.Status1;
                 var s2 = response.Status2;
@@ -373,6 +421,7 @@ namespace NeoHub.Services.Handlers
             var config = _panelState.GetSession(sessionId)?.Configuration;
             var zoneDefs = config?.ZoneDefinitions.Values;
 
+            var requestedAt = DateTime.UtcNow;
             var response = await RequestAsync<ModuleZoneStatus>(
                 sessionId,
                 new CommandRequestMessage
@@ -399,8 +448,13 @@ namespace NeoHub.Services.Handlers
                     && zoneDefs[zoneIndex] == PanelConfiguration.Sections.ZoneDefinition.NullZone)
                     continue;
 
-                var zone = _panelState.GetZone(sessionId, zoneNumber)
-                    ?? new ZoneState { ZoneNumber = zoneNumber };
+                var existing = _panelState.GetZone(sessionId, zoneNumber);
+                if (!ShouldApplyPulledStatus(existing?.LastUpdated, requestedAt))
+                {
+                    _logger.LogDebug("Zone {Zone} changed while its status was being read; keeping the live state", zoneNumber);
+                    continue;
+                }
+                var zone = existing ?? new ZoneState { ZoneNumber = zoneNumber };
 
                 zone.IsOpen = status.HasFlag(ModuleZoneStatus.ZoneStatusEnum.Open);
                 zone.IsFaulted = status.HasFlag(ModuleZoneStatus.ZoneStatusEnum.Fault);
@@ -408,9 +462,10 @@ namespace NeoHub.Services.Handlers
                 zone.IsBypassed = status.HasFlag(ModuleZoneStatus.ZoneStatusEnum.Bypass);
                 zone.LastUpdated = DateTime.UtcNow;
 
-                // Partition assignment: keep existing if already populated by config read
-                if (!zone.Partitions.Any())
-                    zone.Partitions.Add(1);
+                // Partition assignment: keep existing if already populated by config read.
+                // Replaced, never mutated: readers may be enumerating the current list.
+                if (zone.Partitions.Count == 0)
+                    zone.Partitions = [1];
 
                 _panelState.UpdateZone(sessionId, zone);
             }
@@ -427,6 +482,10 @@ namespace NeoHub.Services.Handlers
                 SessionID = sessionId,
                 MessageData = request
             }, ct);
+
+            // SessionMediator turns cancellation into a failed response; stop the pull rather
+            // than carrying on against (or for) a connection that has ended.
+            ct.ThrowIfCancellationRequested();
 
             if (!response.Success)
             {
