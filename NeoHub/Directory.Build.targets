@@ -1,0 +1,6 @@
+<Project>
+  <!-- After the project body, so it sees NeoHubBannedApis set there. -->
+  <PropertyGroup Condition="'$(NeoHubBannedApis)' == 'true' or '$(NeoHubBannedTestApis)' == 'true'">
+    <WarningsAsErrors>$(WarningsAsErrors);RS0030</WarningsAsErrors>
+  </PropertyGroup>
+</Project>

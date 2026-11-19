@@ -1,4 +1,5 @@
-using System.Collections.Concurrent;
+using System.Collections.Frozen;
+using DSC.TLink.Concurrency;
 using DSC.TLink.ITv2;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
@@ -18,22 +19,28 @@ namespace NeoHub.Services.Diagnostics
         private readonly IDiagnosticsLogService _diagnosticsService;
         private readonly IOptionsMonitor<DiagnosticsSettings> _settings;
         private readonly IConfiguration _configuration;
-        private readonly ConcurrentDictionary<string, LogLevel> _configLevelCache = new();
+        private readonly TimeProvider _time;
+        // The Logging:LogLevel table, parsed once per configuration (re)load. Immutable; replaced
+        // whole by the reload callback, its only writer.
+        private readonly Snapshot<LogLevelTable> _levels;
         private readonly IDisposable? _configChangeRegistration;
         private IExternalScopeProvider? _scopeProvider;
 
         public DiagnosticsLoggerProvider(
             IDiagnosticsLogService diagnosticsService,
             IOptionsMonitor<DiagnosticsSettings> settings,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            TimeProvider time)
         {
             _diagnosticsService = diagnosticsService;
             _settings = settings;
             _configuration = configuration;
+            _time = time;
+            _levels = new(LogLevelTable.From(configuration));
 
             _configChangeRegistration = ChangeToken.OnChange(
                 () => _configuration.GetReloadToken(),
-                () => _configLevelCache.Clear());
+                () => _levels.Publish(LogLevelTable.From(_configuration)));
         }
 
         public void SetScopeProvider(IExternalScopeProvider scopeProvider)
@@ -43,7 +50,7 @@ namespace NeoHub.Services.Diagnostics
 
         public ILogger CreateLogger(string categoryName)
         {
-            return new DiagnosticsLogger(categoryName, _diagnosticsService, _settings, _configuration, _configLevelCache, this);
+            return new DiagnosticsLogger(categoryName, _diagnosticsService, _settings, this);
         }
 
         public void Dispose()
@@ -57,24 +64,18 @@ namespace NeoHub.Services.Diagnostics
             private readonly bool _isSolutionCategory;
             private readonly IDiagnosticsLogService _diagnosticsService;
             private readonly IOptionsMonitor<DiagnosticsSettings> _settings;
-            private readonly IConfiguration _configuration;
-            private readonly ConcurrentDictionary<string, LogLevel> _configLevelCache;
             private readonly DiagnosticsLoggerProvider _provider;
 
             public DiagnosticsLogger(
                 string category,
                 IDiagnosticsLogService diagnosticsService,
                 IOptionsMonitor<DiagnosticsSettings> settings,
-                IConfiguration configuration,
-                ConcurrentDictionary<string, LogLevel> configLevelCache,
                 DiagnosticsLoggerProvider provider)
             {
                 _category = category;
                 _isSolutionCategory = IsSolutionCategory(category);
                 _diagnosticsService = diagnosticsService;
                 _settings = settings;
-                _configuration = configuration;
-                _configLevelCache = configLevelCache;
                 _provider = provider;
             }
 
@@ -94,7 +95,7 @@ namespace NeoHub.Services.Diagnostics
                 // verbose levels only ever apply to solution code
                 if (!_isSolutionCategory)
                 {
-                    var configFloor = _configLevelCache.GetOrAdd(_category, ResolveConfigLevelCore, _configuration);
+                    var configFloor = _provider._levels.Value.For(_category);
                     effectiveLevel = (LogLevel)Math.Max((int)effectiveLevel, (int)configFloor);
                 }
 
@@ -113,7 +114,7 @@ namespace NeoHub.Services.Diagnostics
 
                 _diagnosticsService.AddLog(new DiagnosticsLogEntry
                 {
-                    Timestamp = DateTime.UtcNow,
+                    Timestamp = _provider._time.GetUtcNow().UtcDateTime,
                     LogLevel = logLevel,
                     Category = _category,
                     Message = formatter(state, exception),
@@ -139,35 +140,6 @@ namespace NeoHub.Services.Diagnostics
                 return sessionId;
             }
 
-            /// <summary>
-            /// Resolves the configured log level for a category by walking
-            /// Logging:LogLevel with progressively shorter prefixes, matching
-            /// the same precedence rules ASP.NET Core uses.
-            /// </summary>
-            private static LogLevel ResolveConfigLevelCore(string category, IConfiguration configuration)
-            {
-                var section = configuration.GetSection("Logging:LogLevel");
-
-                var prefix = category;
-                while (true)
-                {
-                    var value = section[prefix];
-                    if (value != null && Enum.TryParse<LogLevel>(value, out var level))
-                        return level;
-
-                    var lastDot = prefix.LastIndexOf('.');
-                    if (lastDot < 0)
-                        break;
-                    prefix = prefix[..lastDot];
-                }
-
-                var defaultValue = section["Default"];
-                if (defaultValue != null && Enum.TryParse<LogLevel>(defaultValue, out var defaultLevel))
-                    return defaultLevel;
-
-                return LogLevel.Information;
-            }
-
             private static bool IsSolutionCategory(string category)
             {
                 foreach (var prefix in SolutionPrefixes)
@@ -176,6 +148,46 @@ namespace NeoHub.Services.Diagnostics
                         return true;
                 }
                 return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Logging:LogLevel as data. <see cref="For"/> walks progressively shorter category prefixes,
+    /// the same precedence ASP.NET Core uses.
+    /// </summary>
+    public sealed class LogLevelTable
+    {
+        private readonly FrozenDictionary<string, LogLevel> _levels;
+        private readonly LogLevel _default;
+
+        private LogLevelTable(FrozenDictionary<string, LogLevel> levels, LogLevel defaultLevel)
+        {
+            _levels = levels;
+            _default = defaultLevel;
+        }
+
+        public static LogLevelTable From(IConfiguration configuration)
+        {
+            var levels = new Dictionary<string, LogLevel>(StringComparer.OrdinalIgnoreCase);
+            foreach (var child in configuration.GetSection("Logging:LogLevel").GetChildren())
+                if (child.Value is { } value && Enum.TryParse<LogLevel>(value, out var level))
+                    levels[child.Key] = level;
+            var defaultLevel = levels.GetValueOrDefault("Default", LogLevel.Information);
+            return new LogLevelTable(levels.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase), defaultLevel);
+        }
+
+        public LogLevel For(string category)
+        {
+            var prefix = category;
+            while (true)
+            {
+                if (_levels.TryGetValue(prefix, out var level))
+                    return level;
+                var lastDot = prefix.LastIndexOf('.');
+                if (lastDot < 0)
+                    return _default;
+                prefix = prefix[..lastDot];
             }
         }
     }

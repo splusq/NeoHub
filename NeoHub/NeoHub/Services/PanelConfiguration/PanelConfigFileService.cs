@@ -13,7 +13,7 @@ namespace NeoHub.Services.PanelConfiguration;
 public record PanelConfigFile
 {
     public string FormatVersion { get; init; } = "2.0";
-    public DateTime ExportedAtUtc { get; init; } = DateTime.UtcNow;
+    public DateTime ExportedAtUtc { get; init; }
     public PanelCapabilities Capabilities { get; init; } = null!;
     public Dictionary<string, PanelConfigSectionFile> Sections { get; init; } = new();
 }
@@ -80,8 +80,11 @@ public class PanelConfigFileService : IPanelConfigFileService
     private readonly string _configDir;
     private readonly ILogger<PanelConfigFileService> _logger;
 
-    public PanelConfigFileService(ISettingsPersistenceService persistence, ILogger<PanelConfigFileService> logger)
+    private readonly TimeProvider _time;
+
+    public PanelConfigFileService(ISettingsPersistenceService persistence, ILogger<PanelConfigFileService> logger, TimeProvider? time = null)
     {
+        _time = time ?? TimeProvider.System;
         _configDir = Path.Combine(persistence.PersistPath, "configs");
         Directory.CreateDirectory(_configDir);
         _logger = logger;
@@ -92,7 +95,7 @@ public class PanelConfigFileService : IPanelConfigFileService
         var file = new PanelConfigFile
         {
             Capabilities = config.Capabilities,
-            ExportedAtUtc = config.LastReadAt ?? DateTime.UtcNow,
+            ExportedAtUtc = config.LastReadAt ?? _time.GetUtcNow().UtcDateTime,
         };
 
         foreach (var section in config.AllSections)
@@ -186,7 +189,7 @@ public class PanelConfigFileService : IPanelConfigFileService
 
         var path = Path.Combine(_configDir, Path.GetFileName(fileName));
         var bytes = ExportToBytes(config);
-        await File.WriteAllBytesAsync(path, bytes);
+        await AtomicFile.WriteAllBytesAsync(path, bytes, _logger);
         _logger.LogInformation("Saved panel config to {Path}", path);
     }
 
@@ -278,7 +281,7 @@ public class PanelConfigFileService : IPanelConfigFileService
         sb.Append($"{config.Capabilities.MaxZones} zones &middot; {config.Capabilities.MaxPartitions} partitions");
         if (config.LastReadAt is not null)
             sb.Append($" &middot; Read: {config.LastReadAt.Value.ToLocalTime():yyyy-MM-dd HH:mm:ss}");
-        sb.Append($" &middot; Printed: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.Append($" &middot; Printed: {_time.GetLocalNow():yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine("</div>");
 
         foreach (var section in config.AllSections)

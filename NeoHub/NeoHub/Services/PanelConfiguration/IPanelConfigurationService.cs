@@ -22,9 +22,8 @@ public record SectionResult(bool Success, string? ErrorMessage = null);
 public interface IPanelConfigurationService
 {
     /// <summary>
-    /// Acquires the config lock, enters installer config mode, reads all known sections,
-    /// exits config mode, and releases the lock.
-    /// Results are stored on SessionState.Configuration.
+    /// Queued behind the panel's other programming-mode operations: enters installer config
+    /// mode, reads all known sections, exits. Results are stored on SessionState.Configuration.
     /// </summary>
     Task<SectionResult> ReadAllAsync(string sessionId, string installerCode, CancellationToken ct);
 
@@ -36,11 +35,18 @@ public interface IPanelConfigurationService
     Task ReadSectionsAsync(string sessionId, SendSectionRead send, CancellationToken ct);
 
     /// <summary>
-    /// Enters config mode with the specified privilege, executes the operation,
-    /// then always exits. Does NOT acquire the config lock — the caller must
-    /// hold it if concurrent access is a concern.
+    /// Queued behind the panel's other programming-mode operations: enters config mode with
+    /// the specified privilege, executes the operation, then always exits.
     /// </summary>
     Task<SectionResult> ExecuteInConfigModeAsync(
+        string sessionId, string installerCode, bool readWrite,
+        Func<Task<SectionResult>> operation, CancellationToken ct);
+
+    /// <summary>
+    /// The same, without queueing: only for code already running as a panel operation
+    /// (the configuration pull), which holds the panel's turn.
+    /// </summary>
+    Task<SectionResult> RunInConfigModeAsync(
         string sessionId, string installerCode, bool readWrite,
         Func<Task<SectionResult>> operation, CancellationToken ct);
 

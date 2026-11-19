@@ -68,13 +68,17 @@ namespace NeoHub
             builder.Services.AddRazorComponents()
                 .AddInteractiveServerComponents();
 
-            // MediatR
-            builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssemblies(
-                typeof(Program).Assembly,
-                typeof(StartupExtensions).Assembly));
+            // Told about panels connecting/disconnecting, in this order: settings and the session
+            // list first, then the configuration pull (which runs in the background).
+            builder.Services.AddSingleton<DSC.TLink.ITv2.Sessions.IPanelLifecycleObserver, NeoHub.Services.Handlers.SessionLifecycleHandler>();
+            builder.Services.AddSingleton<DSC.TLink.ITv2.Sessions.IPanelLifecycleObserver, NeoHub.Services.Handlers.PanelConfigurationHandler>();
 
             // Application services
-            builder.Services.AddSingleton<IPanelStateService, PanelStateService>();
+            builder.Services.AddSingleton<NeoHub.Domain.PanelStore>();
+            builder.Services.AddSingleton<NeoHub.Domain.PanelOperations>();
+            builder.Services.AddSingleton<NeoHub.Domain.IPanelOperations>(sp => sp.GetRequiredService<NeoHub.Domain.PanelOperations>());
+            builder.Services.AddSingleton<IPanelStateService>(sp => sp.GetRequiredService<NeoHub.Domain.PanelStore>());
+            builder.Services.AddSingleton<DSC.TLink.ITv2.IPanelMessageSink>(sp => sp.GetRequiredService<NeoHub.Domain.PanelStore>());
             builder.Services.AddSingleton<IPanelCommandService, PanelCommandService>();
             builder.Services.AddSingleton<IPanelUserService, PanelUserService>();
             builder.Services.AddSingleton<IPanelUserListFileService, PanelUserListFileService>();
@@ -85,6 +89,7 @@ namespace NeoHub
             builder.Services.AddSingleton<IConnectionSettingsProvider, ConnectionSettingsProvider>();
 
             // WebSocket API
+            builder.Services.AddSingleton<ClientHub>();
             builder.Services.AddSingleton<PanelWebSocketHandler>();
 
             // TLink infrastructure

@@ -145,6 +145,10 @@ public class ZoneAssignmentSection : IConfigSection
     /// <summary>Exports all assignment data as a contiguous bitmap buffer (partition-major).</summary>
     public byte[] Export()
     {
+        // Not read yet: nothing to export (was an out-of-range crash).
+        if (_assignments.Length == 0)
+            return [];
+
         int maxPartitions = _capabilities.MaxPartitions;
         int maxZones = _capabilities.MaxZones;
         int bytesPerPartition = (maxZones + 7) / 8;
@@ -245,7 +249,10 @@ public class ZoneAssignmentSection : IConfigSection
             for (int bit = 0; bit < 8; bit++)
             {
                 int zoneIndex = byteIndex * 8 + bit;
-                if (zoneIndex < maxZones && _assignments[partitionIndex, zoneIndex])
+                if (zoneIndex < maxZones
+                    && partitionIndex < _assignments.GetLength(0)
+                    && zoneIndex < _assignments.GetLength(1)
+                    && _assignments[partitionIndex, zoneIndex])
                     bitmap |= (byte)(0x80 >> bit);
             }
             data[byteIndex] = bitmap;

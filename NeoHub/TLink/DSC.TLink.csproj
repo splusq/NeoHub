@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <NeoHubBannedApis>true</NeoHubBannedApis>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -26,10 +27,11 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="DSC.TLink.Tests" />
+    <InternalsVisibleTo Include="CaptureTool" />
+    <InternalsVisibleTo Include="NeoHub.Tests" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="MediatR" Version="12.5.0" />
   </ItemGroup>
   
 	<ItemGroup>

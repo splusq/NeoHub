@@ -1,15 +1,12 @@
 using DSC.TLink.ITv2;
-using DSC.TLink.ITv2.MediatR;
-using MediatR;
+using DSC.TLink.ITv2.Sessions;
 
 namespace NeoHub.Services.Handlers
 {
     /// <summary>
-    /// Relays MediatR session lifecycle notifications to the UI event service.
+    /// Confirms connection defaults and announces the changed session list.
     /// </summary>
-    public class SessionLifecycleHandler :
-        INotificationHandler<SessionConnectedNotification>,
-        INotificationHandler<SessionDisconnectedNotification>
+    public class SessionLifecycleHandler : IPanelLifecycleObserver
     {
         private readonly ISessionMonitor _monitor;
         private readonly IPanelStateService _panelState;
@@ -28,6 +25,13 @@ namespace NeoHub.Services.Handlers
             _logger = logger;
         }
 
+        public Task OnLifecycleAsync(PanelLifecycleEvent e, CancellationToken cancellationToken) => e switch
+        {
+            SessionConnectedNotification c => Handle(c, cancellationToken),
+            SessionDisconnectedNotification d => Handle(d, cancellationToken),
+            _ => Task.CompletedTask,
+        };
+
         public Task Handle(SessionConnectedNotification notification, CancellationToken cancellationToken)
         {
             _logger.LogInformation("Session connected");
@@ -39,7 +43,7 @@ namespace NeoHub.Services.Handlers
         public Task Handle(SessionDisconnectedNotification notification, CancellationToken cancellationToken)
         {
             _logger.LogInformation("Session disconnected");
-            _panelState.RemoveSession(notification.SessionId);
+            // State is removed by the connection's own ordered stream (SessionEnded).
             _monitor.NotifyChanged();
             return Task.CompletedTask;
         }

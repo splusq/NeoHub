@@ -1,14 +1,14 @@
 @page "/dev-console"
-@using DSC.TLink.ITv2.MediatR
+@using DSC.TLink.ITv2.Sessions
 @using DSC.TLink.ITv2.Messages
 @using DSC.TLink.Extensions
 @using NeoHub.Services
 @using NeoHub.Services.Diagnostics
-@using MediatR
 @using System.Reflection
+@inject TimeProvider Time
 @inject IITv2SessionManager SessionManager
-@inject ISessionMonitor SessionMonitor
-@inject IMediator Mediator
+@inject IPanelStateService PanelState
+@inject IPanelSender Mediator
 @inject IDiagnosticsLogService LogService
 @inject IJSRuntime JS
 @implements IDisposable
@@ -189,24 +189,31 @@
     private bool _autoScroll = true;
     private bool _disposed;
     private bool _renderDirty;
-    private Timer? _renderTimer;
+    private ITimer? _renderTimer;
 
     private static readonly IReadOnlyList<MessageTypeInfo> _catalog = MessageCatalog.GetSendable();
 
     protected override void OnInitialized()
     {
         RefreshSessions();
-        SessionMonitor.SessionsChanged += OnSessionsChanged;
-        LogService.LogReceived += OnLogReceived;
-
-        foreach (var entry in LogService.GetLogs().TakeLast(200))
-            _rawLogEntries.Add(entry);
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            if (c is Domain.SessionsChanged or Domain.SessionRemoved or Domain.Resynchronize) OnSessionsChanged();
+        });
+        _logFeed = DiagnosticsLogFeed.Start(LogService, e =>
+        {
+            switch (e)
+            {
+                case LogReset reset: OnLogReset(reset.Entries); break;
+                case LogAppended appended: OnLogReceived(appended.Entry); break;
+            }
+        });
 
         // Periodic render for external event updates (log entries, session changes).
         // Coalesces rapid-fire events into a single StateHasChanged() call and avoids
         // calling StateHasChanged() directly from event callbacks, which races with
         // circuit teardown on browser refresh.
-        _renderTimer = new Timer(_ => InvokeAsync(() =>
+        _renderTimer = Time.CreateTimer(_ => InvokeAsync(() =>
         {
             if (_disposed || !_renderDirty) return;
             try
@@ -215,7 +222,7 @@
                 StateHasChanged();
             }
             catch (ObjectDisposedException) { }
-        }), null, 200, 200);
+        }), null, TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(200));
     }
 
     protected override Task OnAfterRenderAsync(bool firstRender)
@@ -236,6 +243,8 @@
             _sessionId = _activeSessions.FirstOrDefault();
     }
 
+    private Domain.PanelChangeFeed? _feed;
+
     private void OnSessionsChanged()
     {
         InvokeAsync(() =>
@@ -247,6 +256,19 @@
                 _renderDirty = true;
             }
             catch (ObjectDisposedException) { }
+        });
+    }
+
+    private DiagnosticsLogFeed? _logFeed;
+
+    private void OnLogReset(IReadOnlyList<DiagnosticsLogEntry> entries)
+    {
+        InvokeAsync(() =>
+        {
+            if (_disposed) return;
+            _rawLogEntries.Clear();
+            _rawLogEntries.AddRange(entries.TakeLast(300));
+            _renderDirty = true;
         });
     }
 
@@ -604,7 +626,7 @@
     {
         _disposed = true;
         _renderTimer?.Dispose();
-        SessionMonitor.SessionsChanged -= OnSessionsChanged;
-        LogService.LogReceived -= OnLogReceived;
+        _feed?.Dispose();
+        _logFeed?.Dispose();
     }
 }

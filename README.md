@@ -1,6 +1,6 @@
 # NeoHub
 
-A real-time web portal for monitoring and controlling DSC PowerSeries NEO alarm panels via the ITv2 (TLink) protocol. Built with Blazor Server, MudBlazor, and MediatR.
+A real-time web portal for monitoring and controlling DSC PowerSeries NEO alarm panels via the ITv2 (TLink) protocol. Built with Blazor Server and MudBlazor.
 
 > This is the [splusq](https://github.com/splusq/NeoHub) fork of [BrianHumlicek/NeoHub](https://github.com/BrianHumlicek/NeoHub). It runs on .NET 10, ships a smaller non-root image, and reports each zone's `device_class` from the panel's zone definitions (see [Zone device classes](#zone-device-classes)).
 
@@ -202,14 +202,17 @@ Once the panel has been configured, return to the NeoHub web UI. If everything i
 
 ## 🏗️ Architecture
 
-````````markdown
+NeoHub has no locks. Protocol and panel-state logic are pure functions over immutable data;
+everything else is a small actor that owns its state and reads one `Channel<T>`. See
+[docs/Architecture.md](docs/Architecture.md) for the full picture.
+
 ### Key Components
 
-- **DSC.TLink** — Protocol library (ITv2 framing, encryption, session management)
-- **MediatR** — Decouples panel messages from business logic via notification handlers
-- **Notification Handlers** — Transform panel notifications into application state
-- **State Services** — Singleton stores for partition/zone status
-- **Event-Driven UI** — Blazor components subscribe to state change events (zero polling)
+- **DSC.TLink** — ITv2 protocol library. `Connection.Step` is the protocol as a pure state machine (handshake, sequencing, acks, reply matching, readiness, timeouts, heartbeat); `PanelConnection` runs it for one TCP connection; `PanelRegistry` tracks which connection speaks for each panel.
+- **PanelStore** — panel state. Applies events in order with the pure `PanelReducer`, publishes immutable snapshots, and streams changes to subscribers.
+- **PanelOperations** — one lane per panel, so programming-mode work (configuration pull, user codes, bypass) never overlaps.
+- **ClientHub** — the WebSocket API. Each client has its own ordered outbox.
+- **Event-driven UI** — Blazor pages subscribe to the store's change stream (zero polling).
 
 ---
 
@@ -313,6 +316,12 @@ For more details about the DSC ITv2 (TLink) protocol, see:
 
 Issues and pull requests are welcome! For major changes, please open an issue first to discuss the proposed changes.
 
+Before changing anything that runs concurrently, read [docs/Architecture.md](docs/Architecture.md). The build rejects locks, concurrent collections and direct clock reads (`NeoHub/BannedSymbols.txt`), and the tests run repeatedly on 1 and 2 cores:
+
+```bash
+dotnet test NeoHub/TLink.Tests && dotnet test NeoHub/NeoHub.Tests
+```
+
 ---
 
 ## 🙏 Acknowledgements
@@ -320,5 +329,4 @@ Issues and pull requests are welcome! For major changes, please open an issue fi
 Built with:
 - [Blazor](https://dotnet.microsoft.com/apps/aspnet/web-apps/blazor) — .NET web framework
 - [MudBlazor](https://mudblazor.com/) — Material Design component library
-- [MediatR](https://github.com/jbogard/MediatR) — In-process messaging
 - [DSC TLink](https://github.com/BrianHumlicek/DSC-TLink) — ITv2 protocol library

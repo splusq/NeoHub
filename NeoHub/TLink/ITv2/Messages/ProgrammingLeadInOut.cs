@@ -9,7 +9,8 @@ namespace DSC.TLink.ITv2.Messages
         [CompactInteger]
         public int Partition {  get; init; }
         public ProgrammingType Programming { get; init; }
-        [CompactInteger]
+        // The panel always sends this two bytes wide, even for 0 ([02 00 00]).
+        [CompactInteger(MinBytes = 2)]
         public int UserCode { get; init; }
         public ProgrammingLeadInOutAccess Access { get; init; }
         public ProgrammingMode Mode { get; init; }

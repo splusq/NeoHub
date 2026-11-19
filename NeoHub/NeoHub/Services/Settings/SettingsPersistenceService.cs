@@ -1,26 +1,47 @@
-using Microsoft.Extensions.Options;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading.Channels;
+using Microsoft.Extensions.Options;
 
 namespace NeoHub.Services.Settings
 {
-    /// <summary>
-    /// Generic service for reading and persisting settings to persist/userSettings.json
-    /// </summary>
+    /// <summary>Reads and persists settings sections in persist/userSettings.json.</summary>
     public interface ISettingsPersistenceService
     {
         object GetSettings(Type settingsType);
+
+        /// <summary>Saves <paramref name="settings"/> as its section. The value is captured when this is called.</summary>
         Task SaveSettingsAsync(Type settingsType, object settings);
+
+        /// <summary>
+        /// Changes the live settings of type <typeparamref name="T"/> and saves them, one change at a
+        /// time: <paramref name="change"/> runs on the store's loop (never concurrently with
+        /// another change or save) and returns whether it changed anything.
+        /// </summary>
+        Task<bool> UpdateAsync<T>(Func<T, bool> change) where T : class;
+
         string PersistPath { get; }
     }
 
-    public class SettingsPersistenceService : ISettingsPersistenceService
+    /// <summary>
+    /// The only writer of userSettings.json. Saves and changes are messages in one channel,
+    /// handled in order by one loop; each batch is written once, atomically (temp file, then
+    /// rename), so neither a crash nor the configuration reloader ever sees a half-written file.
+    /// </summary>
+    public sealed class SettingsPersistenceService : ISettingsPersistenceService, IAsyncDisposable
     {
         private const string PersistFolder = "persist";
         private const string SettingsFileName = "userSettings.json";
-        
-        private readonly IServiceProvider _serviceProvider;
+        private static readonly JsonSerializerOptions WriteOptions = new() { WriteIndented = true };
+
+        private abstract record Message(TaskCompletionSource<bool> Done);
+        private sealed record Save(string Section, JsonNode? Value, TaskCompletionSource<bool> Done) : Message(Done);
+        private sealed record Change(Type SettingsType, Func<object, bool> Apply, TaskCompletionSource<bool> Done) : Message(Done);
+
+        private readonly Channel<Message> _inbox = Channel.CreateUnbounded<Message>(new UnboundedChannelOptions { SingleReader = true });
+        private readonly Func<Type, object> _current;
         private readonly ILogger<SettingsPersistenceService> _log;
-        private readonly SemaphoreSlim _fileLock = new(1, 1);
+        private readonly Task _run;
 
         /// <summary>
         /// Returns the persist folder path. Checks NEOHUB_PERSIST_PATH env var first,
@@ -40,74 +61,200 @@ namespace NeoHub.Services.Settings
             => Path.Combine(GetPersistPath(contentRootPath), SettingsFileName);
 
         public string PersistPath { get; }
-        private string SettingsFilePath { get; }
+        internal string SettingsFilePath { get; }
 
-        public SettingsPersistenceService(
-            IServiceProvider serviceProvider,
-            IWebHostEnvironment env,
-            ILogger<SettingsPersistenceService> log)
+        public SettingsPersistenceService(IServiceProvider serviceProvider, IWebHostEnvironment env, ILogger<SettingsPersistenceService> log)
+            : this(GetPersistPath(env.ContentRootPath), type => CurrentValue(serviceProvider, type), log) { }
+
+        internal SettingsPersistenceService(string persistPath, Func<Type, object> current, ILogger<SettingsPersistenceService> log)
         {
-            _serviceProvider = serviceProvider;
+            _current = current;
             _log = log;
-            PersistPath = GetPersistPath(env.ContentRootPath);
+            PersistPath = persistPath;
             SettingsFilePath = Path.Combine(PersistPath, SettingsFileName);
-
-            // Ensure persist directory exists
             Directory.CreateDirectory(PersistPath);
             _log.LogInformation("Settings file: {Path}", SettingsFilePath);
+            _run = RunAsync();
         }
 
-        public object GetSettings(Type settingsType)
+        public object GetSettings(Type settingsType) => _current(settingsType);
+
+        public Task SaveSettingsAsync(Type settingsType, object settings)
         {
-            var optionsMonitorType = typeof(IOptionsMonitor<>).MakeGenericType(settingsType);
-            var optionsMonitor = _serviceProvider.GetRequiredService(optionsMonitorType);
-            var currentValueProperty = optionsMonitorType.GetProperty("CurrentValue");
-            return currentValueProperty!.GetValue(optionsMonitor)!;
+            // Captured now, on the caller: later edits to the object don't leak into this save.
+            var value = JsonSerializer.SerializeToNode(settings, settingsType);
+            return Post(new Save(SectionName(settingsType), value, NewDone())).Task;
         }
 
-        public async Task SaveSettingsAsync(Type settingsType, object settings)
+        public Task<bool> UpdateAsync<T>(Func<T, bool> change) where T : class
+            => Post(new Change(typeof(T), o => change((T)o), NewDone())).Task;
+
+        public async ValueTask DisposeAsync()
         {
-            var sectionNameField = settingsType.GetField("SectionName", 
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-            var sectionName = sectionNameField?.GetValue(null)?.ToString() ?? settingsType.Name;
+            _inbox.Writer.TryComplete();
+            await _run;
+        }
 
-            await _fileLock.WaitAsync();
-            try
+        private static TaskCompletionSource<bool> NewDone() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private TaskCompletionSource<bool> Post(Message message)
+        {
+            if (!_inbox.Writer.TryWrite(message))
+                message.Done.TrySetException(new ObjectDisposedException(nameof(SettingsPersistenceService)));
+            return message.Done;
+        }
+
+        private async Task RunAsync()
+        {
+            await Task.Yield();
+            var batch = new List<Message>();
+            while (await _inbox.Reader.WaitToReadAsync())
             {
-                var rootSettings = await ReadSettingsFileAsync();
-                rootSettings[sectionName] = settings;
+                // Everything queued so far goes into one write.
+                batch.Clear();
+                while (_inbox.Reader.TryRead(out var m))
+                    batch.Add(m);
 
-                var options = new JsonSerializerOptions { WriteIndented = true };
-                var updatedJson = JsonSerializer.Serialize(rootSettings, options);
-                await File.WriteAllTextAsync(SettingsFilePath, updatedJson);
+                var root = ReadRoot();
+                var changed = new List<(Message Message, bool Changed)>();
+                foreach (var message in batch)
+                {
+                    try
+                    {
+                        switch (message)
+                        {
+                            case Save save:
+                                root[save.Section] = save.Value;
+                                _log.LogInformation("Saving settings for section {Section}", save.Section);
+                                changed.Add((save, true));
+                                break;
+                            case Change change:
+                                var current = _current(change.SettingsType);
+                                var did = change.Apply(current);
+                                if (did)
+                                    root[SectionName(change.SettingsType)] = JsonSerializer.SerializeToNode(current, change.SettingsType);
+                                changed.Add((change, did));
+                                break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        message.Done.TrySetException(ex);
+                    }
+                }
 
-                _log.LogInformation("Saved settings for section {Section}", sectionName);
-            }
-            finally
-            {
-                _fileLock.Release();
+                if (changed.Count == 0)
+                    continue;
+                try
+                {
+                    if (changed.Any(c => c.Changed))
+                        await AtomicFile.WriteAllTextAsync(SettingsFilePath, root.ToJsonString(WriteOptions), _log);
+                    foreach (var (message, did) in changed)
+                        message.Done.TrySetResult(did);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Failed to write {File}", SettingsFilePath);
+                    foreach (var (message, _) in changed)
+                        message.Done.TrySetException(ex);
+                }
             }
         }
 
-        private async Task<Dictionary<string, object>> ReadSettingsFileAsync()
+        private JsonObject ReadRoot()
         {
             if (!File.Exists(SettingsFilePath))
-                return new Dictionary<string, object>();
-
+                return new JsonObject();
             try
             {
-                var json = await File.ReadAllTextAsync(SettingsFilePath);
-                
-                if (string.IsNullOrWhiteSpace(json))
-                    return new Dictionary<string, object>();
-
-                return JsonSerializer.Deserialize<Dictionary<string, object>>(json) 
-                    ?? new Dictionary<string, object>();
+                var json = File.ReadAllText(SettingsFilePath);
+                return string.IsNullOrWhiteSpace(json) ? new JsonObject() : JsonNode.Parse(json) as JsonObject ?? new JsonObject();
             }
             catch (JsonException ex)
             {
                 _log.LogWarning(ex, "Invalid JSON in {File}, starting fresh", SettingsFilePath);
-                return new Dictionary<string, object>();
+                return new JsonObject();
+            }
+        }
+
+        private static string SectionName(Type settingsType)
+            => settingsType.GetField("SectionName", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                   ?.GetValue(null)?.ToString() ?? settingsType.Name;
+
+        private static object CurrentValue(IServiceProvider services, Type settingsType)
+        {
+            var monitorType = typeof(IOptionsMonitor<>).MakeGenericType(settingsType);
+            var monitor = services.GetRequiredService(monitorType);
+            return monitorType.GetProperty("CurrentValue")!.GetValue(monitor)!;
+        }
+    }
+
+    /// <summary>
+    /// Replaces a file's contents so readers (and a crash) see either the old file or the new
+    /// one, never a mix: write a temp file in the same directory, flush it to disk, rename it over
+    /// the target.
+    /// </summary>
+    public static class AtomicFile
+    {
+        public static Task WriteAllTextAsync(string path, string contents, ILogger? log = null)
+            => WriteAllBytesAsync(path, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(contents), log);
+
+        public static async Task WriteAllBytesAsync(string path, byte[] contents, ILogger? log = null)
+        {
+            var temp = TempPath(path);
+            try
+            {
+                await using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    await stream.WriteAsync(contents);
+                    stream.Flush(flushToDisk: true);
+                }
+                if (!TryReplace(temp, path, log))
+                    await File.WriteAllBytesAsync(path, contents);
+            }
+            finally
+            {
+                if (File.Exists(temp))
+                    File.Delete(temp);
+            }
+        }
+
+        /// <summary>For startup code that runs before anything is asynchronous.</summary>
+        public static void WriteAllText(string path, string contents, ILogger? log = null)
+        {
+            var bytes = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(contents);
+            var temp = TempPath(path);
+            try
+            {
+                using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(bytes);
+                    stream.Flush(flushToDisk: true);
+                }
+                if (!TryReplace(temp, path, log))
+                    File.WriteAllBytes(path, bytes);
+            }
+            finally
+            {
+                if (File.Exists(temp))
+                    File.Delete(temp);
+            }
+        }
+
+        private static string TempPath(string path) => $"{path}.{Guid.NewGuid():N}.tmp";
+
+        private static bool TryReplace(string temp, string path, ILogger? log)
+        {
+            try
+            {
+                File.Move(temp, path, overwrite: true);
+                return true;
+            }
+            catch (IOException ex)
+            {
+                // E.g. the file itself is a bind mount, which can't be replaced by rename.
+                log?.LogWarning("Could not replace {Path} atomically ({Error}); writing it in place", path, ex.Message);
+                return false;
             }
         }
     }

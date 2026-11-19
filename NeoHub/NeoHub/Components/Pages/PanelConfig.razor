@@ -4,13 +4,13 @@
 @using NeoHub.Services.Settings
 @using NeoHub.Services.PanelConfiguration
 @using NeoHub.Services.PanelConfiguration.Sections
-@using DSC.TLink.ITv2.MediatR
+@using DSC.TLink.ITv2.Sessions
 @using Microsoft.Extensions.Options
+@inject TimeProvider Time
 @inject IPanelStateService PanelState
 @inject IPanelConfigurationService ConfigService
 @inject IPanelConfigFileService ConfigFileService
 @inject IITv2SessionManager SessionManager
-@inject ISessionMonitor SessionMonitor
 @inject IJSRuntime JS
 @inject IOptionsMonitor<PanelConnectionsSettings> ConnectionSettings
 @inject IPanelAccessCodeService AccessCodes
@@ -271,8 +271,11 @@
     protected override void OnInitialized()
     {
         RefreshSessions();
-        SessionMonitor.SessionsChanged += OnSessionsChanged;
-        PanelState.SessionStateChanged += OnStateChanged;
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            if (c is Domain.SessionsChanged or Domain.SessionRemoved or Domain.Resynchronize) OnSessionsChanged();
+            if (c is Domain.SessionChanged or Domain.SessionRemoved or Domain.Resynchronize) OnStateChanged();
+        });
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -321,7 +324,9 @@
         });
     }
 
-    private void OnStateChanged(object? sender, EventArgs e)
+    private Domain.PanelChangeFeed? _feed;
+
+    private void OnStateChanged()
     {
         InvokeAsync(() =>
         {
@@ -400,10 +405,12 @@
         var zoneState = _session?.Zones.GetValueOrDefault((byte)zoneNumber);
         var statusText = zoneState is not null ? $" — {GetZoneStatusText(zoneState)}" : "";
 
+        // The dialog edits a copy; the store's configuration is never modified in place.
+        var working = _config.Clone();
         var parameters = new DialogParameters<ZoneEditDialog>
         {
             { x => x.ZoneNumber, zoneNumber },
-            { x => x.Config, _config },
+            { x => x.Config, working },
             { x => x.SessionId, _sessionId },
             { x => x.InstallerCode, _installerCode }
         };
@@ -412,6 +419,7 @@
         var result = await dialog.Result;
         if (result?.Canceled == false)
         {
+            await PanelState.DispatchAsync(new NeoHub.Domain.ConfigurationReplaced(_sessionId, working));
             _session = PanelState.GetSession(_sessionId);
             _config = _session?.Configuration;
             StateHasChanged();
@@ -423,12 +431,13 @@
         if (_config is null || _sessionId is null || _installerCode is null) return;
 
         var partState = _session?.Partitions.GetValueOrDefault((byte)partitionNumber);
-        var statusText = partState is not null ? $" — {FormatEnumName(partState.EffectiveStatus.ToString())}" : "";
+        var statusText = partState is not null ? $" — {FormatEnumName(partState.EffectiveStatusAt(Time.GetUtcNow().UtcDateTime).ToString())}" : "";
 
+        var working = _config.Clone();
         var parameters = new DialogParameters<PartitionEditDialog>
         {
             { x => x.PartitionNumber, partitionNumber },
-            { x => x.Config, _config },
+            { x => x.Config, working },
             { x => x.SessionId, _sessionId },
             { x => x.InstallerCode, _installerCode }
         };
@@ -437,6 +446,7 @@
         var result = await dialog.Result;
         if (result?.Canceled == false)
         {
+            await PanelState.DispatchAsync(new NeoHub.Domain.ConfigurationReplaced(_sessionId, working));
             _session = PanelState.GetSession(_sessionId);
             _config = _session?.Configuration;
             StateHasChanged();
@@ -478,11 +488,11 @@
                  Variant="@(zone.IsOpen || zone.IsFaulted || zone.IsTampered ? Variant.Filled : Variant.Outlined)">@text</MudChip>;
     };
 
-    private static RenderFragment GetPartitionStatusChip(PartitionState? part, PartitionEnable enabled) => __builder =>
+    private RenderFragment GetPartitionStatusChip(PartitionState? part, PartitionEnable enabled) => __builder =>
     {
         if (enabled != PartitionEnable.Enabled) { <MudChip T="string" Size="Size.Small" Color="Color.Default">Disabled</MudChip>; return; }
         if (part is null) { <MudChip T="string" Size="Size.Small" Color="Color.Default">Unknown</MudChip>; return; }
-        var status = part.EffectiveStatus;
+        var status = part.EffectiveStatusAt(Time.GetUtcNow().UtcDateTime);
         var color = status switch
         {
             PartitionStatus.Disarmed => Color.Success,
@@ -527,8 +537,7 @@
     public void Dispose()
     {
         _disposed = true;
-        SessionMonitor.SessionsChanged -= OnSessionsChanged;
-        PanelState.SessionStateChanged -= OnStateChanged;
+        _feed?.Dispose();
     }
 
     private async Task SaveToServerAsync()
@@ -537,7 +546,7 @@
 
         try
         {
-            var fileName = $"panel-config-{_sessionId}-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var fileName = $"panel-config-{_sessionId}-{Time.GetLocalNow().DateTime:yyyyMMdd-HHmmss}.json";
             await ConfigFileService.SaveToServerAsync(_config, fileName);
             Snackbar.Add($"Saved to server: {fileName}", Severity.Success);
         }
@@ -555,7 +564,7 @@
         {
             var bytes = ConfigFileService.ExportToBytes(_config);
             var base64 = Convert.ToBase64String(bytes);
-            var fileName = $"panel-config-{_sessionId}-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var fileName = $"panel-config-{_sessionId}-{Time.GetLocalNow().DateTime:yyyyMMdd-HHmmss}.json";
             await JS.InvokeVoidAsync("downloadFile", fileName, base64, "application/json");
         }
         catch (Exception ex)
@@ -617,7 +626,7 @@
         {
             // No current config to diff against — just apply directly
             if (_sessionId is not null)
-                PanelState.UpdateSession(_sessionId, s => s.Configuration = incoming);
+                PanelState.Dispatch(new NeoHub.Domain.ConfigurationReplaced(_sessionId, incoming));
             _session = _sessionId is not null ? PanelState.GetSession(_sessionId) : null;
             _config = _session?.Configuration;
             Snackbar.Add($"Loaded: {sourceName}", Severity.Success);
@@ -630,7 +639,7 @@
         var parameters = new DialogParameters<ConfigDiffDialog>
         {
             { x => x.Diffs, diffs },
-            { x => x.CurrentConfig, _config },
+            { x => x.CurrentConfig, _config.Clone() },
             { x => x.IncomingConfig, incoming },
             { x => x.SessionId, _sessionId },
             { x => x.InstallerCode, _installerCode ?? "" }
@@ -655,7 +664,7 @@
         if (!wasWritten)
         {
             // Preview only — swap in-memory config without writing to panel
-            PanelState.UpdateSession(_sessionId, s => s.Configuration = incoming);
+            PanelState.Dispatch(new NeoHub.Domain.ConfigurationReplaced(_sessionId, incoming));
         }
 
         _session = PanelState.GetSession(_sessionId);

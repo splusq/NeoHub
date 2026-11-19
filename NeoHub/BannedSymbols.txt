@@ -1,0 +1,35 @@
+T:System.Threading.Monitor;No locks: share state through a Channel<T> actor or DSC.TLink.Concurrency.Snapshot<T>
+T:System.Threading.Lock;No locks: share state through a Channel<T> actor or DSC.TLink.Concurrency.Snapshot<T>
+T:System.Threading.SemaphoreSlim;No locks: serialize work through a Channel<T> (see PanelOperations)
+T:System.Threading.Semaphore;No locks: serialize work through a Channel<T>
+T:System.Threading.Mutex;No locks: serialize work through a Channel<T>
+T:System.Threading.ReaderWriterLockSlim;No locks: publish immutable snapshots (Snapshot<T>)
+T:System.Threading.SpinLock;No locks
+T:System.Threading.Interlocked;Atomics live only in DSC.TLink.Concurrency.Snapshot<T>
+T:System.Threading.Volatile;Atomics live only in DSC.TLink.Concurrency.Snapshot<T>
+T:System.Collections.Concurrent.ConcurrentDictionary`2;Use an actor's own state or Snapshot<ImmutableDictionary<,>>
+T:System.Collections.Concurrent.ConcurrentBag`1;Use an actor's own state
+T:System.Collections.Concurrent.ConcurrentQueue`1;Use a Channel<T>
+T:System.Collections.Concurrent.ConcurrentStack`1;Use an actor's own state
+T:System.Collections.Concurrent.BlockingCollection`1;Use a Channel<T>
+T:System.Threading.Timer;Use TimeProvider.CreateTimer so tests control time
+P:System.DateTime.Now;Use TimeProvider.GetLocalNow()
+P:System.DateTime.UtcNow;Use TimeProvider.GetUtcNow()
+P:System.DateTimeOffset.Now;Use TimeProvider.GetLocalNow()
+P:System.DateTimeOffset.UtcNow;Use TimeProvider.GetUtcNow()
+P:System.Environment.TickCount;Use TimeProvider
+P:System.Environment.TickCount64;Use TimeProvider
+M:System.Threading.Thread.Sleep(System.Int32);Never block a thread on time
+M:System.Threading.Thread.Sleep(System.TimeSpan);Never block a thread on time
+M:System.Threading.Tasks.Task.Delay(System.Int32);Use Task.Delay(TimeSpan, TimeProvider, CancellationToken)
+M:System.Threading.Tasks.Task.Delay(System.Int32,System.Threading.CancellationToken);Use Task.Delay(TimeSpan, TimeProvider, CancellationToken)
+M:System.Threading.Tasks.Task.Delay(System.TimeSpan);Use Task.Delay(TimeSpan, TimeProvider, CancellationToken)
+M:System.Threading.Tasks.Task.Delay(System.TimeSpan,System.Threading.CancellationToken);Use Task.Delay(TimeSpan, TimeProvider, CancellationToken)
+M:System.Threading.CancellationTokenSource.#ctor(System.Int32);Use new CancellationTokenSource(TimeSpan, TimeProvider)
+M:System.Threading.CancellationTokenSource.#ctor(System.TimeSpan);Use new CancellationTokenSource(TimeSpan, TimeProvider)
+M:System.Threading.CancellationTokenSource.CancelAfter(System.Int32);Use new CancellationTokenSource(TimeSpan, TimeProvider)
+M:System.Threading.CancellationTokenSource.CancelAfter(System.TimeSpan);Use new CancellationTokenSource(TimeSpan, TimeProvider)
+M:System.Threading.Tasks.Task.WaitAsync(System.TimeSpan);Use WaitAsync(TimeSpan, TimeProvider)
+M:System.Threading.Tasks.Task.WaitAsync(System.TimeSpan,System.Threading.CancellationToken);Use WaitAsync(TimeSpan, TimeProvider, CancellationToken)
+M:System.Threading.Tasks.Task`1.WaitAsync(System.TimeSpan);Use WaitAsync(TimeSpan, TimeProvider)
+M:System.Threading.Tasks.Task`1.WaitAsync(System.TimeSpan,System.Threading.CancellationToken);Use WaitAsync(TimeSpan, TimeProvider, CancellationToken)

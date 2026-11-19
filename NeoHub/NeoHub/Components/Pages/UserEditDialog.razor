@@ -272,7 +272,7 @@
                 CodeValue = _code,
                 CodeLength = User.CodeLength,
                 Attributes = _attributes,
-                Partitions = BuildPartitionList(),
+                Partitions = [.. BuildPartitionList()],
                 HasProximityTag = User.HasProximityTag,
             };
 
@@ -283,7 +283,7 @@
                 CodeValue = _origCode,
                 CodeLength = User.CodeLength,
                 Attributes = _origAttributes,
-                Partitions = BuildPartitionList(_origPartitionAssigned),
+                Partitions = [.. BuildPartitionList(_origPartitionAssigned)],
                 HasProximityTag = User.HasProximityTag,
             };
 
