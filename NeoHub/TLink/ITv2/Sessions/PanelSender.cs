@@ -55,6 +55,18 @@ namespace DSC.TLink.ITv2.Sessions
                     };
                 }
 
+                // A Nack: the panel refused the command itself (bad length, partition, code...).
+                if (result.Value is CommandError nack)
+                {
+                    _logger.LogWarning("Panel refused {Command}: {Nack}", nack.NackCommand, nack.NackCode);
+                    return new SessionResponse
+                    {
+                        Success = false,
+                        ErrorMessage = $"Panel refused {nack.NackCommand}: {nack.NackCode}",
+                        MessageData = nack,
+                    };
+                }
+
                 if (result.Value is CommandResponse { ResponseCode: not CommandResponseCode.Success } errorResponse)
                 {
                     _logger.LogWarning("Panel rejected command: [{Code}] {Description}",
