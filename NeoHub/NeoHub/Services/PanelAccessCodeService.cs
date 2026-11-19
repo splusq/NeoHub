@@ -1,9 +1,7 @@
-using System.Collections.Concurrent;
 using DSC.TLink.ITv2;
 using DSC.TLink.ITv2.Enumerations;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
 using DSC.TLink.ITv2.Messages;
-using MediatR;
 using Microsoft.Extensions.Options;
 using NeoHub.Services.Models;
 using NeoHub.Services.Settings;
@@ -66,7 +64,7 @@ public interface IPanelAccessCodeService
     // ── Authenticated operations ─────────────────────────────────────────────
 
     /// <summary>
-    /// Acquires <see cref="SessionState.ConfigLock"/>, enters the programming mode corresponding
+    /// Runs as one queued panel operation (<see cref="NeoHub.Domain.IPanelOperations"/>), enters the programming mode corresponding
     /// to <paramref name="kind"/> authenticated with <paramref name="code"/>, runs
     /// <paramref name="operation"/>, then always exits programming mode and releases the lock.
     /// The shared lock serializes installer and master operations against each other for the
@@ -88,11 +86,13 @@ public interface IPanelAccessCodeService
 }
 
 public class PanelAccessCodeService(
-    IMediator mediator,
+    IPanelSender mediator,
     IPanelStateService panelState,
     IOptionsMonitor<PanelConnectionsSettings> connectionSettings,
     ISettingsPersistenceService persistence,
-    ILogger<PanelAccessCodeService> logger)
+    ILogger<PanelAccessCodeService> logger,
+    NeoHub.Domain.IPanelOperations operations,
+    TimeProvider time)
     : IPanelAccessCodeService
 {
     /// <summary>How long to wait for the panel's programming-mode confirmation (LeadIn).</summary>
@@ -101,8 +101,11 @@ public class PanelAccessCodeService(
     /// <summary>Short settle delay after exiting programming mode before re-entering.</summary>
     private static readonly TimeSpan ReEntryDelay = TimeSpan.FromMilliseconds(500);
 
-    private readonly ConcurrentDictionary<(string SessionId, PanelAccessCodeKind Kind), string> _cache
-        = new(new CacheKeyComparer());
+    /// <summary>How long to wait for the panel to confirm it left programming mode (LeadOut).</summary>
+    private static readonly TimeSpan LeadOutTimeout = TimeSpan.FromSeconds(3);
+
+    private readonly DSC.TLink.Concurrency.Snapshot<System.Collections.Immutable.ImmutableDictionary<(string SessionId, PanelAccessCodeKind Kind), string>> _cache
+        = new(System.Collections.Immutable.ImmutableDictionary.Create<(string SessionId, PanelAccessCodeKind Kind), string>(new CacheKeyComparer()));
 
     // ── Format ───────────────────────────────────────────────────────────────
 
@@ -136,24 +139,28 @@ public class PanelAccessCodeService(
     {
         if (string.IsNullOrEmpty(sessionId)) return false;
 
-        var conn = FindConnection(sessionId);
-        if (conn is null) return false;
-
         var normalized = string.IsNullOrEmpty(newCode) ? null : newCode;
 
-        var current = kind switch
+        // Changed and saved on the settings store's loop, never alongside another change.
+        var changed = await persistence.UpdateAsync<PanelConnectionsSettings>(settings =>
         {
-            PanelAccessCodeKind.Installer => conn.InstallerCode,
-            PanelAccessCodeKind.Master => conn.MasterCode,
-            _ => null,
-        };
-        if (current == normalized) return false;
-
-        switch (kind)
-        {
-            case PanelAccessCodeKind.Installer: conn.InstallerCode = normalized; break;
-            case PanelAccessCodeKind.Master: conn.MasterCode = normalized; break;
-        }
+            var conn = settings.FindBySessionId(sessionId);
+            if (conn is null) return false;
+            var current = kind switch
+            {
+                PanelAccessCodeKind.Installer => conn.InstallerCode,
+                PanelAccessCodeKind.Master => conn.MasterCode,
+                _ => null,
+            };
+            if (current == normalized) return false;
+            switch (kind)
+            {
+                case PanelAccessCodeKind.Installer: conn.InstallerCode = normalized; break;
+                case PanelAccessCodeKind.Master: conn.MasterCode = normalized; break;
+            }
+            return true;
+        });
+        if (!changed) return false;
 
         // Keep cache coherent with the persisted value.
         if (string.IsNullOrEmpty(normalized))
@@ -161,7 +168,6 @@ public class PanelAccessCodeService(
         else
             SetCached(sessionId, kind, normalized);
 
-        await persistence.SaveSettingsAsync(typeof(PanelConnectionsSettings), connectionSettings.CurrentValue);
         logger.LogInformation(
             "Updated {Kind} code in connection settings for session {SessionId}", kind, sessionId);
         return true;
@@ -171,7 +177,7 @@ public class PanelAccessCodeService(
 
     public bool TryGetCached(string sessionId, PanelAccessCodeKind kind, out string? code)
     {
-        if (_cache.TryGetValue((sessionId, kind), out var cached))
+        if (_cache.Value.TryGetValue((sessionId, kind), out var cached))
         {
             code = cached;
             return true;
@@ -187,11 +193,11 @@ public class PanelAccessCodeService(
             InvalidateCache(sessionId, kind);
             return;
         }
-        _cache[(sessionId, kind)] = code;
+        _cache.Update(c => c.SetItem((sessionId, kind), code));
     }
 
     public void InvalidateCache(string sessionId, PanelAccessCodeKind kind) =>
-        _cache.TryRemove((sessionId, kind), out _);
+        _cache.Update(c => c.Remove((sessionId, kind)));
 
     // ── Authenticated operations ─────────────────────────────────────────────
 
@@ -206,24 +212,22 @@ public class PanelAccessCodeService(
         if (string.IsNullOrEmpty(code))
             return new PanelAccessResult<T>(false, default, "Access code is required");
 
-        var session = panelState.GetSession(sessionId);
-        if (session is null)
+        if (panelState.GetSession(sessionId) is null)
             return new PanelAccessResult<T>(false, default, "Session not found");
 
-        // Acquire the shared panel-mode lock for the full scope. This serializes all installer
-        // and master operations for the same session — verify, reads, writes — so we never have
-        // two callers fighting over the panel's single programming-mode slot.
-        await session.ConfigLock.WaitAsync(ct);
-        try
+        // One panel operation for the full scope: verify, reads and writes for the same panel
+        // never fight over its single programming-mode slot (or interleave with the pull, a
+        // configuration write or a bypass).
+        return await operations.RunAsync(sessionId, $"{kind} code operation", async opCt =>
         {
             var mode = MapProgrammingMode(kind);
 
-            if (!await EnterProgrammingModeAsync(sessionId, session, mode, code, readWrite, ct))
+            if (!await EnterProgrammingModeAsync(sessionId, mode, code, readWrite, opCt))
                 return new PanelAccessResult<T>(false, default, $"Panel rejected {kind} code");
 
             try
             {
-                var result = await operation(ct);
+                var result = await operation(opCt);
                 return new PanelAccessResult<T>(true, result);
             }
             catch (Exception ex)
@@ -233,13 +237,9 @@ public class PanelAccessCodeService(
             }
             finally
             {
-                await ExitProgrammingModeAsync(sessionId, ct);
+                await ExitProgrammingModeAsync(sessionId, opCt);
             }
-        }
-        finally
-        {
-            session.ConfigLock.Release();
-        }
+        }, ct);
     }
 
     public async Task<bool> VerifyAsync(string sessionId, PanelAccessCodeKind kind, string code, CancellationToken ct)
@@ -273,16 +273,25 @@ public class PanelAccessCodeService(
     /// the "partition busy" error).
     /// </summary>
     private async Task<bool> EnterProgrammingModeAsync(
-        string sessionId, SessionState session, ProgrammingMode mode, string code, bool readWrite, CancellationToken ct)
+        string sessionId, ProgrammingMode mode, string code, bool readWrite, CancellationToken ct)
     {
-        if (session.IsInProgrammingMode)
+        // Read now (not before the operation was queued): state is an immutable snapshot.
+        if (panelState.GetSession(sessionId)?.IsInProgrammingMode == true)
         {
             logger.LogDebug("Panel already in programming mode on {SessionId}, exiting before re-enter", sessionId);
-            await ExitProgrammingModeAsync(sessionId, ct);
-            await Task.Delay(ReEntryDelay, ct);
+            using (var leadOut = new NeoHub.Domain.SessionWatch(panelState, sessionId, s => !s.IsInProgrammingMode, LeadOutTimeout, time))
+            {
+                await ExitProgrammingModeAsync(sessionId, ct);
+                if (!await leadOut.WaitAsync(ct))
+                    logger.LogDebug("No LeadOut within {Timeout} on {SessionId}; re-entering anyway", LeadOutTimeout, sessionId);
+            }
+            await Task.Delay(ReEntryDelay, time, ct);
         }
 
         logger.LogInformation("Entering {Mode} mode on {SessionId}", mode, sessionId);
+
+        // Watching starts before the request, so a LeadIn that beats the reply is not missed.
+        using var leadIn = new NeoHub.Domain.SessionWatch(panelState, sessionId, s => s.IsInProgrammingMode, ProgrammingModeTimeout, time);
 
         var enterResponse = await mediator.Send(new SessionCommand
         {
@@ -307,14 +316,7 @@ public class PanelAccessCodeService(
 
         // Wait for LeadIn. Without this, the panel sometimes rejects the first real command
         // sent inside the scope with a spurious "not ready" error.
-        var deadline = DateTime.UtcNow + ProgrammingModeTimeout;
-        while (!session.IsInProgrammingMode && DateTime.UtcNow < deadline)
-        {
-            ct.ThrowIfCancellationRequested();
-            await Task.Delay(100, ct);
-        }
-
-        if (!session.IsInProgrammingMode)
+        if (!await leadIn.WaitAsync(ct))
         {
             logger.LogWarning("Timed out waiting for LeadIn after {Seconds}s on {SessionId}",
                 ProgrammingModeTimeout.TotalSeconds, sessionId);

@@ -19,7 +19,9 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.DependencyInjection;
 using DSC.TLink.ITv2;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
+using DSC.TLink.ITv2.Runtime;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace DSC.TLink
 {
@@ -34,15 +36,13 @@ namespace DSC.TLink
 		/// <param name="listenPort">TCP port for panel connections (default: <see cref="ConnectionSettings.DefaultListenPort"/>)</param>
 		public static WebApplicationBuilder UseITv2(this WebApplicationBuilder builder, int listenPort = ConnectionSettings.DefaultListenPort)
 		{
-			// MediatR - Register TLink assembly only
-			builder.Services.AddMediatR(configuration =>
-			{
-				configuration.RegisterServicesFromAssembly(typeof(ITv2Session).Assembly);
-			});
-
 			// Singleton services (shared across all connections)
-			builder.Services.AddSingleton<IITv2SessionManager, ITv2SessionManager>();
-			builder.Services.AddSingleton<SessionMediator>();
+			builder.Services.TryAddSingleton(TimeProvider.System);
+			builder.Services.AddSingleton<PanelRegistry>();
+			builder.Services.AddSingleton<IITv2SessionManager>(sp => sp.GetRequiredService<PanelRegistry>());
+			builder.Services.AddSingleton<PanelLifecycle>();
+			builder.Services.AddSingleton<IPanelSender, PanelSender>();
+			builder.Services.AddHostedService<PanelLifecycleDispatcher>();
 			builder.Services.AddSingleton<ITv2ConnectionHandler>();
 			builder.Services.AddHostedService<SessionShutdownService>();
 

@@ -36,13 +36,26 @@ internal class TLinkTransport : ITLinkTransport
 
     #region Inbound
 
+    /// <summary>
+    /// Largest number of bytes buffered while looking for a frame delimiter. Real frames are a
+    /// few hundred bytes; beyond this the input is garbage and is dropped to resynchronize.
+    /// Kept well below the input pipe's pause threshold, or the writer would pause before the
+    /// reader saw enough bytes to drop.
+    /// </summary>
+    internal const int MaxFrameBytes = 16 * 1024;
+
+    /// <summary>
+    /// Yields frames until the connection closes or is cancelled. A malformed frame is yielded
+    /// as a failure and reading continues (the next 0x7F resynchronizes); one bad frame no
+    /// longer ends the connection.
+    /// </summary>
     public async IAsyncEnumerable<Result<TLinkMessage>> ReadAllAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
             var result = await ReadMessageAsync(cancellationToken);
-            if (result.IsFailure)
+            if (result.IsFailure && result.Error!.Value.Code is TLinkErrorCode.Disconnected or TLinkErrorCode.Cancelled)
                 yield break;
 
             yield return result;
@@ -66,11 +79,13 @@ internal class TLinkTransport : ITLinkTransport
             }
 
             var buffer = readResult.Buffer;
+            var extracted = false;
 
             try
             {
                 if (TryExtractPacket(ref buffer, out var rawPacket))
                 {
+                    extracted = true;
                     _logger.LogTrace("Recv {Packet}", new HexBytes(rawPacket.ToArray()));
 
                     var transformResult = TransformInbound(rawPacket);
@@ -93,10 +108,21 @@ internal class TLinkTransport : ITLinkTransport
 
                     return parseResult;
                 }
+
+                if (buffer.Length > MaxFrameBytes)
+                {
+                    _logger.LogWarning("Dropping {Bytes} bytes with no frame delimiter", buffer.Length);
+                    buffer = buffer.Slice(buffer.End);
+                    return Result<TLinkMessage>.Fail(TLinkErrorCode.FramingError,
+                        $"No frame delimiter within {MaxFrameBytes} bytes");
+                }
             }
             finally
             {
-                reader.AdvanceTo(buffer.Start, buffer.End);
+                // After taking a frame, only that frame was examined: bytes already buffered
+                // after it (a second frame from the same read) must come back on the next read
+                // at once. Marking them examined would hold them until more data arrived.
+                reader.AdvanceTo(buffer.Start, extracted ? buffer.Start : buffer.End);
             }
 
             if (readResult.IsCompleted)

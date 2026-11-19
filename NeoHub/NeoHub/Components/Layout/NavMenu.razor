@@ -1,3 +1,4 @@
+@inject TimeProvider Time
 @inject NavigationManager Navigation
 
 <div class="top-row ps-3 navbar navbar-dark">
@@ -50,11 +51,11 @@
             ? "unknown"
             : BuildInfo.GitCommit[..Math.Min(7, BuildInfo.GitCommit.Length)];
 
-    private static string BuildAge
+    private string BuildAge
     {
         get
         {
-            var age = DateTime.UtcNow - BuildInfo.BuildTimeUtc;
+            var age = Time.GetUtcNow().UtcDateTime - BuildInfo.BuildTimeUtc;
             return age.TotalHours < 48
                 ? $"{(int)age.TotalHours}h ago"
                 : $"{(int)age.TotalDays}d ago";

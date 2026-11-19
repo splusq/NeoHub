@@ -24,5 +24,11 @@ namespace DSC.TLink.Serialization
     [AttributeUsage(AttributeTargets.Property)]
     public sealed class CompactIntegerAttribute : Attribute
     {
+        /// <summary>
+        /// Smallest number of value bytes to write. Some fields are always sent wider than
+        /// their value needs (the panel sends a user number of 0 as [02 00 00]); setting this
+        /// makes such fields re-encode exactly as received. Default 1: minimal encoding.
+        /// </summary>
+        public int MinBytes { get; init; } = 1;
     }
 }

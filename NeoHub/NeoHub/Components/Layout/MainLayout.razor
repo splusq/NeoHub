@@ -1,8 +1,9 @@
 ﻿@inherits LayoutComponentBase
 @using NeoHub.Services
 @using NeoHub.Services.Models
-@using DSC.TLink.ITv2.MediatR
+@using DSC.TLink.ITv2.Sessions
 @using Microsoft.JSInterop
+@inject TimeProvider Time
 @inject IPanelStateService PanelState
 @inject IITv2SessionManager SessionManager
 @inject IJSRuntime JS
@@ -25,10 +26,10 @@
                 return Enumerable.Empty<(string SessionId, PartitionState Partition)>();
 
             return session.Partitions.Values
-                .Where(p => p.ExitDelayActive && p.ExitDelayRemaining.HasValue && p.ExitDelayRemaining.Value > TimeSpan.Zero)
+                .Where(p => p.ExitDelayActive && p.ExitDelayRemainingAt(Now) is { } left && left > TimeSpan.Zero)
                 .Select(p => (SessionId: sessionId, Partition: p));
         })
-        .OrderBy(item => item.Partition.ExitDelayRemaining)
+        .OrderBy(item => item.Partition.ExitDelayRemainingAt(Now))
         .ToList();
 }
 
@@ -37,7 +38,7 @@
     var item = activeDelays[i];
     var partition = item.Partition;
     var sessionId = item.SessionId;
-    var remaining = partition.ExitDelayRemaining!.Value;
+    var remaining = partition.ExitDelayRemainingAt(Now)!.Value;
     var severity = partition.ExitDelayUrgent ? Severity.Error : Severity.Warning;
     var icon = partition.ExitDelayUrgent ? Icons.Material.Filled.Warning : Icons.Material.Filled.Timer;
     // Shortest delay (index 0) gets highest z-index
@@ -88,17 +89,22 @@
 </div>
 
 @code {
-    private Timer? _refreshTimer;
+    private ITimer? _refreshTimer;
+    private DateTime Now => Time.GetUtcNow().UtcDateTime;
     private bool _isBeeping = false;
     private bool _wasUrgent = false;
     private CancellationTokenSource _cts = new();
 
     protected override void OnInitialized()
     {
-        PanelState.PartitionStateChanged += OnPartitionStateChanged;
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            if (c is Domain.PartitionChanged or Domain.SessionRemoved or Domain.Resynchronize)
+                OnPartitionStateChanged();
+        });
 
         // Refresh UI every second for countdown and audio management
-        _refreshTimer = new Timer(_ =>
+        _refreshTimer = Time.CreateTimer(_ =>
         {
             _ = SafeInvokeAsync(async () =>
             {
@@ -111,7 +117,9 @@
         }, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
     }
 
-    private void OnPartitionStateChanged(object? sender, PartitionStateChangedEventArgs e)
+    private Domain.PanelChangeFeed? _feed;
+
+    private void OnPartitionStateChanged()
     {
         _ = SafeInvokeAsync(async () =>
         {
@@ -151,7 +159,7 @@
                 var session = PanelState.GetSession(sessionId);
                 return session?.Partitions.Values ?? Enumerable.Empty<PartitionState>();
             })
-            .Any(p => p.ExitDelayActive && p.ExitDelayRemaining.HasValue && p.ExitDelayRemaining.Value > TimeSpan.Zero);
+            .Any(p => p.ExitDelayActive && p.ExitDelayRemainingAt(Now) is { } left && left > TimeSpan.Zero);
     }
 
     private async Task UpdateExitDelayBeepAsync(bool hasActiveDelay, CancellationToken token)
@@ -165,7 +173,7 @@
                     var session = PanelState.GetSession(sessionId);
                     return session?.Partitions.Values ?? Enumerable.Empty<PartitionState>();
                 })
-                .Where(p => p.ExitDelayActive && p.ExitDelayAudible && p.ExitDelayRemaining.HasValue && p.ExitDelayRemaining.Value > TimeSpan.Zero)
+                .Where(p => p.ExitDelayActive && p.ExitDelayAudible && p.ExitDelayRemainingAt(Now) is { } left && left > TimeSpan.Zero)
                 .ToList()
             : [];
 
@@ -205,7 +213,7 @@
         _cts.Cancel();
         _refreshTimer?.Dispose();
 
-        PanelState.PartitionStateChanged -= OnPartitionStateChanged;
+        _feed?.Dispose();
         _cts.Dispose();
     }
 }

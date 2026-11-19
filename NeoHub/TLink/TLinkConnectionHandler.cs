@@ -14,14 +14,22 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+using System.Security.Cryptography;
 using DSC.TLink.ITv2;
-using DSC.TLink.ITv2.MediatR;
+using DSC.TLink.ITv2.Sessions;
+using DSC.TLink.ITv2.Protocol;
+using DSC.TLink.ITv2.Runtime;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace DSC.TLink
 {
+    /// <summary>
+    /// Kestrel entry point for a panel's TCP connection. Starts a <see cref="PanelConnection"/>,
+    /// registers it once its handshake succeeds, hands its notifications to the application,
+    /// and unregisters it when it ends. Owns no protocol state itself.
+    /// </summary>
     internal class ITv2ConnectionHandler : ConnectionHandler
     {
         private readonly IServiceProvider _serviceProvider;
@@ -42,52 +50,96 @@ namespace DSC.TLink
         {
             _log.LogInformation("Connection request from {RemoteEndPoint}", connection.RemoteEndPoint);
 
+            var settingsProvider = _serviceProvider.GetRequiredService<IConnectionSettingsProvider>();
+            var loggerFactory = _serviceProvider.GetRequiredService<ILoggerFactory>();
+            var sink = _serviceProvider.GetService<IPanelMessageSink>();
+            var registry = _serviceProvider.GetRequiredService<PanelRegistry>();
+            var time = _serviceProvider.GetRequiredService<TimeProvider>();
+
+            var transport = new TLinkTransport(connection.Transport, loggerFactory.CreateLogger<TLinkTransport>());
+            var panel = PanelConnection.Start(
+                transport,
+                (sessionId, encryption) => Credentials(settingsProvider.ResolveConnection(sessionId, encryption)),
+                time,
+                new ConnectionConfig(ConnectionTimings.Default, RandomNumberGenerator.GetBytes(ConnectionConfig.LocalRandomLength)),
+                loggerFactory.CreateLogger<PanelConnection>());
+
+            // The panel's stream goes to the application in order: started, messages, ended.
+            var started = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var delivery = DeliverAsync(panel, sink, time, started);
             try
             {
-                var settingsProvider = _serviceProvider.GetRequiredService<IConnectionSettingsProvider>();
-                var loggerFactory = _serviceProvider.GetRequiredService<ILoggerFactory>();
-                var sessionMediator = _serviceProvider.GetRequiredService<SessionMediator>();
-                var sessionManager = _serviceProvider.GetRequiredService<IITv2SessionManager>();
-
-                var result = await ITv2Session.CreateAsync(
-                    connection.Transport, settingsProvider, loggerFactory, connection.ConnectionClosed);
-
-                if (result.IsFailure)
+                var sessionId = await started.Task;
+                if (sessionId is null)
                 {
-                    _log.LogError("Session failed to initialize: {Error}", result.Error);
+                    _log.LogWarning("Panel connection ended before its handshake completed");
                     return;
                 }
 
-                await using var session = result.Value;
-
-                using var sessionScope = _log.BeginScope(
-                    CreateLogScope(session.SessionId));
-
-                sessionManager.RegisterSession(session.SessionId, session);
+                using var scope = _log.BeginScope(CreateLogScope(sessionId));
+                registry.Register(panel);
                 try
                 {
-                    await foreach (var message in session.GetNotificationsAsync(connection.ConnectionClosed))
-                    {
-                        await sessionMediator.PublishNotificationAsync(session.SessionId, message);
-                    }
+                    await panel.Completion;
                 }
                 finally
                 {
-                    sessionManager.UnregisterSession(session.SessionId, session);
+                    registry.Unregister(panel);
                 }
-            }
-            catch (OperationCanceledException) when (connection.ConnectionClosed.IsCancellationRequested)
-            {
-                _log.LogInformation("Connection cancelled");
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "ITv2 connection error");
             }
             finally
             {
+                await panel.Completion;
+                await delivery;
                 _log.LogInformation("TLink disconnected from {RemoteEndPoint}", connection.RemoteEndPoint);
             }
         }
+
+        /// <summary>
+        /// One ordered stream per connection: "started" (before the connection is registered, so
+        /// before anything reacts to it), every notification in arrival order, then "ended".
+        /// </summary>
+        private async Task DeliverAsync(PanelConnection panel, IPanelMessageSink? sink, TimeProvider time, TaskCompletionSource<string?> started)
+        {
+            string sessionId;
+            try
+            {
+                sessionId = await panel.Established;
+            }
+            catch (OperationCanceledException)
+            {
+                started.TrySetResult(null);
+                return;
+            }
+
+            Safely(() => sink?.Started(sessionId, panel.ConnectionId, time.GetUtcNow()));
+            started.TrySetResult(sessionId);
+            try
+            {
+                await foreach (var message in panel.GetNotificationsAsync())
+                    Safely(() => sink?.Accept(message));
+            }
+            finally
+            {
+                Safely(() => sink?.Ended(sessionId, panel.ConnectionId));
+            }
+        }
+
+        private void Safely(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Panel message sink failed");
+            }
+        }
+
+        private static ConnectionCredentials? Credentials(ConnectionSettings? settings)
+            => settings is null
+                ? null
+                : new ConnectionCredentials(settings.EncryptionType, settings.IntegrationAccessCodeType1, settings.IntegrationAccessCodeType2);
     }
 }

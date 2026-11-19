@@ -15,7 +15,7 @@ namespace NeoHub.Services;
 public record PanelUserListFile
 {
     public string FormatVersion { get; init; } = "1.0";
-    public DateTime ExportedAtUtc { get; init; } = DateTime.UtcNow;
+    public DateTime ExportedAtUtc { get; init; }
 
     /// <summary>Informational: the panel's reported <c>MaxUsers</c> at export time.</summary>
     public int MaxUsers { get; init; }
@@ -60,12 +60,14 @@ public interface IPanelUserListFileService
     /// <remarks>Exports include plaintext access codes. The resulting file is sensitive.</remarks>
     byte[] ExportToBytes(PanelUserListState userList, int maxUsers, int maxPartitions);
 
+    /// <summary>Parses a user list file (throws on invalid data).</summary>
+    PanelUserListFile Parse(byte[] data);
+
     /// <summary>
-    /// Merges the file's users into <paramref name="target"/>. Slots present in the file overwrite
-    /// matching slots in the target; slots absent from the file are left alone. Returns the header
-    /// info from the file so callers can compare against current capabilities if desired.
+    /// Pure: <paramref name="target"/> with the file's users merged in. Slots present in the file
+    /// replace matching slots; slots absent from the file are kept.
     /// </summary>
-    PanelUserListFile ImportInto(byte[] data, PanelUserListState target);
+    PanelUserListState MergeInto(PanelUserListState target, PanelUserListFile file);
 
     /// <summary>Saves the user list to a file in the server's persist folder.</summary>
     Task SaveToServerAsync(PanelUserListState userList, int maxUsers, int maxPartitions, string fileName);
@@ -97,8 +99,11 @@ public class PanelUserListFileService : IPanelUserListFileService
     private readonly string _dir;
     private readonly ILogger<PanelUserListFileService> _logger;
 
-    public PanelUserListFileService(ISettingsPersistenceService persistence, ILogger<PanelUserListFileService> logger)
+    private readonly TimeProvider _time;
+
+    public PanelUserListFileService(ISettingsPersistenceService persistence, ILogger<PanelUserListFileService> logger, TimeProvider? time = null)
     {
+        _time = time ?? TimeProvider.System;
         _dir = Path.Combine(persistence.PersistPath, "users");
         Directory.CreateDirectory(_dir);
         _logger = logger;
@@ -110,7 +115,7 @@ public class PanelUserListFileService : IPanelUserListFileService
     {
         var file = new PanelUserListFile
         {
-            ExportedAtUtc = userList.LastReadAt ?? DateTime.UtcNow,
+            ExportedAtUtc = userList.LastReadAt ?? _time.GetUtcNow().UtcDateTime,
             MaxUsers = maxUsers,
             MaxPartitions = maxPartitions,
             Users = userList.Users.Values
@@ -122,20 +127,20 @@ public class PanelUserListFileService : IPanelUserListFileService
         return JsonSerializer.SerializeToUtf8Bytes(file, JsonOptions);
     }
 
-    public PanelUserListFile ImportInto(byte[] data, PanelUserListState target)
+    public PanelUserListFile Parse(byte[] data)
     {
         var file = JsonSerializer.Deserialize<PanelUserListFile>(data, JsonOptions)
             ?? throw new InvalidOperationException("Invalid user list file");
-
-        foreach (var record in file.Users)
-        {
-            target.Users[record.UserIndex] = FromRecord(record);
-        }
-
-        target.LastReadAt = file.ExportedAtUtc;
-        _logger.LogInformation("Imported {Count} users from file (v{Version})", file.Users.Count, file.FormatVersion);
+        _logger.LogInformation("Parsed {Count} users from file (v{Version})", file.Users.Count, file.FormatVersion);
         return file;
     }
+
+    public PanelUserListState MergeInto(PanelUserListState target, PanelUserListFile file)
+        => target with
+        {
+            Users = target.Users.SetItems(file.Users.Select(r => KeyValuePair.Create(r.UserIndex, FromRecord(r, file.ExportedAtUtc)))),
+            LastReadAt = file.ExportedAtUtc,
+        };
 
     private static PanelUserRecord ToRecord(PanelUserState u) => new()
     {
@@ -148,16 +153,16 @@ public class PanelUserListFileService : IPanelUserListFileService
         HasProximityTag = u.HasProximityTag,
     };
 
-    private static PanelUserState FromRecord(PanelUserRecord r) => new()
+    private static PanelUserState FromRecord(PanelUserRecord r, DateTime importedFrom) => new()
     {
         UserIndex = r.UserIndex,
         UserLabel = r.Label,
         CodeValue = r.Code,
         CodeLength = r.CodeLength,
         Attributes = (PanelUserAttributes)r.Attributes,
-        Partitions = new List<byte>(r.Partitions),
+        Partitions = [.. r.Partitions],
         HasProximityTag = r.HasProximityTag,
-        LastUpdated = DateTime.UtcNow,
+        LastUpdated = importedFrom,
     };
 
     // ── Server persistence ───────────────────────────────────────────────────
@@ -169,7 +174,7 @@ public class PanelUserListFileService : IPanelUserListFileService
 
         var path = Path.Combine(_dir, Path.GetFileName(fileName));
         var bytes = ExportToBytes(userList, maxUsers, maxPartitions);
-        await File.WriteAllBytesAsync(path, bytes);
+        await AtomicFile.WriteAllBytesAsync(path, bytes, _logger);
         _logger.LogInformation("Saved user list to {Path}", path);
     }
 
@@ -229,7 +234,7 @@ public class PanelUserListFileService : IPanelUserListFileService
         sb.Append($"{maxUsers} user slots &middot; {maxPartitions} partitions");
         if (userList.LastReadAt is not null)
             sb.Append($" &middot; Read: {userList.LastReadAt.Value.ToLocalTime():yyyy-MM-dd HH:mm:ss}");
-        sb.Append($" &middot; Printed: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.Append($" &middot; Printed: {_time.GetLocalNow():yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine("</div>");
 
         if (revealCodes)
@@ -311,7 +316,7 @@ public class PanelUserListFileService : IPanelUserListFileService
             return string.Join(", ", names);
         }
 
-        static string FormatPartitions(List<byte> parts)
-            => parts.Count == 0 ? "—" : string.Join(", ", parts.OrderBy(p => p).Select(p => $"P{p}"));
+        static string FormatPartitions(IEnumerable<byte> parts)
+            => !parts.Any() ? "—" : string.Join(", ", parts.OrderBy(p => p).Select(p => $"P{p}"));
     }
 }

@@ -2,14 +2,14 @@
 @using NeoHub.Services
 @using NeoHub.Services.Models
 @using NeoHub.Services.Settings
-@using DSC.TLink.ITv2.MediatR
+@using DSC.TLink.ITv2.Sessions
 @using DSC.TLink.ITv2.Enumerations
 @using Microsoft.Extensions.Options
+@inject TimeProvider Time
 @inject IPanelUserService UserService
 @inject IPanelUserListFileService UserListFiles
 @inject IPanelStateService PanelState
 @inject IITv2SessionManager SessionManager
-@inject ISessionMonitor SessionMonitor
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
 @inject NavigationManager Navigation
@@ -253,7 +253,7 @@
     private PanelUserReadResult? _lastResult;
     private bool _disposed;
     private bool _renderDirty;
-    private Timer? _renderTimer;
+    private ITimer? _renderTimer;
 
     /// <summary>
     /// True once an auto-read has been attempted in this page session. Prevents the auto-read
@@ -292,10 +292,16 @@
     protected override void OnInitialized()
     {
         RefreshSession();
-        SessionMonitor.SessionsChanged += OnSessionsChanged;
-        PanelState.SessionStateChanged += OnSessionStateChanged;
+        _feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+        {
+            switch (c)
+            {
+                case Domain.SessionsChanged or Domain.SessionRemoved or Domain.Resynchronize: OnSessionsChanged(); break;
+                case Domain.SessionChanged changed: OnSessionStateChanged(changed.SessionId); break;
+            }
+        });
 
-        _renderTimer = new Timer(_ => InvokeAsync(() =>
+        _renderTimer = Time.CreateTimer(_ => InvokeAsync(() =>
         {
             if (_disposed || !_renderDirty) return;
             try
@@ -306,7 +312,7 @@
                 _ = TryAutoReadAsync();
             }
             catch (ObjectDisposedException) { }
-        }), null, 200, 200);
+        }), null, TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(200));
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -347,9 +353,11 @@
         _renderDirty = true;
     }
 
-    private void OnSessionStateChanged(object? sender, SessionStateChangedEventArgs e)
+    private Domain.PanelChangeFeed? _feed;
+
+    private void OnSessionStateChanged(string sessionId)
     {
-        if (_sessionId == null || !string.Equals(_sessionId, e.SessionId, StringComparison.OrdinalIgnoreCase))
+        if (_sessionId == null || !string.Equals(_sessionId, sessionId, StringComparison.OrdinalIgnoreCase))
             return;
 
         _renderDirty = true;
@@ -538,7 +546,7 @@
 
         try
         {
-            var fileName = $"panel-users-{_sessionId}-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var fileName = $"panel-users-{_sessionId}-{Time.GetLocalNow().DateTime:yyyyMMdd-HHmmss}.json";
             await UserListFiles.SaveToServerAsync(
                 _session.UserList, _session.MaxUsers, _session.MaxPartitions, fileName);
             Snackbar.Add($"Saved to server: {fileName}", Severity.Success);
@@ -562,7 +570,7 @@
             var bytes = UserListFiles.ExportToBytes(
                 _session.UserList, _session.MaxUsers, _session.MaxPartitions);
             var base64 = Convert.ToBase64String(bytes);
-            var fileName = $"panel-users-{_sessionId}-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var fileName = $"panel-users-{_sessionId}-{Time.GetLocalNow().DateTime:yyyyMMdd-HHmmss}.json";
             await JS.InvokeVoidAsync("downloadFile", fileName, base64, "application/json");
         }
         catch (Exception ex)
@@ -584,8 +592,8 @@
         try
         {
             var bytes = await UserListFiles.LoadBytesFromServerAsync(fileName);
-            var file = UserListFiles.ImportInto(bytes, _session.UserList);
-            PanelState.UpdateSession(_sessionId!, _ => { });  // notify subscribers of list change
+            var file = UserListFiles.Parse(bytes);
+            await PanelState.DispatchAsync(new NeoHub.Domain.UserListUpdated(_sessionId!, l => UserListFiles.MergeInto(l, file)));
             Snackbar.Add($"Loaded {file.Users.Count} users from {fileName}", Severity.Success);
         }
         catch (Exception ex)
@@ -608,8 +616,8 @@
             // is either not our file or malicious.
             using var ms = new MemoryStream();
             await browserFile.OpenReadStream(maxAllowedSize: 1_048_576).CopyToAsync(ms);
-            var file = UserListFiles.ImportInto(ms.ToArray(), _session.UserList);
-            PanelState.UpdateSession(_sessionId!, _ => { });
+            var file = UserListFiles.Parse(ms.ToArray());
+            await PanelState.DispatchAsync(new NeoHub.Domain.UserListUpdated(_sessionId!, l => UserListFiles.MergeInto(l, file)));
             Snackbar.Add($"Loaded {file.Users.Count} users from {browserFile.Name}", Severity.Success);
         }
         catch (Exception ex)
@@ -709,7 +717,6 @@
     {
         _disposed = true;
         _renderTimer?.Dispose();
-        SessionMonitor.SessionsChanged -= OnSessionsChanged;
-        PanelState.SessionStateChanged -= OnSessionStateChanged;
+        _feed?.Dispose();
     }
 }

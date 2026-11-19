@@ -2,32 +2,30 @@ using NeoHub.Services.Models;
 
 namespace NeoHub.Services
 {
+    /// <summary>
+    /// Read panel state (immutable snapshots) and post changes as events. Implemented by
+    /// <see cref="Domain.PanelStore"/>; all changes go through <see cref="Domain.PanelReducer"/>.
+    /// </summary>
     public interface IPanelStateService
     {
-        // Session operations
         SessionState? GetSession(string sessionId);
         IReadOnlyDictionary<string, SessionState> GetAllSessions();
-        void UpdateSession(string sessionId, Action<SessionState> update);
-        void RemoveSession(string sessionId);
-
-        // Partition operations (partition belongs to session)
         PartitionState? GetPartition(string sessionId, byte partitionNumber);
         IReadOnlyDictionary<byte, PartitionState> GetPartitions(string sessionId);
-        void UpdatePartition(string sessionId, PartitionState partition);
-
-        // Zone operations (zone belongs to session, not partition)
         ZoneState? GetZone(string sessionId, byte zoneNumber);
         IReadOnlyDictionary<byte, ZoneState> GetZones(string sessionId);
-        void UpdateZone(string sessionId, ZoneState zone);
 
-        // Signals that initial configuration pull is complete for a session
-        void OnConfigurationComplete(string sessionId);
+        /// <summary>Version of the last applied event (used to order pulled status against live events).</summary>
+        long Version { get; }
 
-        // Events
-        event EventHandler<SessionStateChangedEventArgs>? SessionStateChanged;
-        event EventHandler<PartitionStateChangedEventArgs>? PartitionStateChanged;
-        event EventHandler<ZoneStateChangedEventArgs>? ZoneStateChanged;
-        event EventHandler<ConfigurationCompleteEventArgs>? ConfigurationComplete;
+        /// <summary>Posts an event; returns at once.</summary>
+        void Dispatch(Domain.PanelEvent e);
+
+        /// <summary>Posts an event; completes once it is applied and subscribers have been told.</summary>
+        Task DispatchAsync(Domain.PanelEvent e);
+
+        /// <summary>Every change from now on, in order, through a channel of its own.</summary>
+        Domain.PanelSubscription Subscribe();
     }
 
     public class SessionStateChangedEventArgs : EventArgs

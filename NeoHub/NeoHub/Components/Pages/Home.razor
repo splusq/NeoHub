@@ -4,12 +4,12 @@
 @using NeoHub.Services.Settings
 @using DSC.TLink.ITv2
 @using DSC.TLink.ITv2.Enumerations
-@using DSC.TLink.ITv2.MediatR
+@using DSC.TLink.ITv2.Sessions
 @using Microsoft.Extensions.Options
+@inject TimeProvider Time
 @inject IPanelStateService PanelState
 @inject IPanelCommandService CommandService
 @inject IITv2SessionManager SessionManager
-@inject ISessionMonitor SessionMonitor
 @inject NavigationManager Navigation
 @inject ISnackbar Snackbar
 @inject IOptionsMonitor<PanelConnectionsSettings> ConnectionSettings
@@ -48,7 +48,7 @@
                              Variant="@(phaseInfo.IsAnimated ? Variant.Filled : Variant.Outlined)">
                         @phaseInfo.Label
                     </MudChip>
-                    @if (isConnected && session?.PanelDateTimeNow is DateTime panelTime)
+                    @if (isConnected && session?.PanelDateTimeAt(Time.GetUtcNow().UtcDateTime) is DateTime panelTime)
                     {
                         <MudText Typo="Typo.caption" Color="Color.Secondary">
                             <MudIcon Icon="@Icons.Material.Filled.Schedule" Size="Size.Small" Class="mr-1" Style="vertical-align: middle;" />
@@ -104,7 +104,7 @@
                                     <MudChip T="string"
                                              Color="@GetPartitionChipColor(partition)"
                                              Size="Size.Small"
-                                             Style="@(partition.EffectiveStatus == PartitionStatus.Arming ? "animation: pulse 1s infinite;" : "")">
+                                             Style="@(partition.EffectiveStatusAt(Time.GetUtcNow().UtcDateTime) == PartitionStatus.Arming ? "animation: pulse 1s infinite;" : "")">
                                         @GetPartitionDisplayText(partition)
                                     </MudChip>
                                 </CardHeaderActions>
@@ -275,7 +275,7 @@
 	private string? disarmSessionId;
 	private byte? disarmPartition;
 	private bool showDisarmDialog;
-	private Timer? _clockTimer;
+	private ITimer? _clockTimer;
 
 	private bool _disposed;
 	private bool _renderDirty;
@@ -283,12 +283,13 @@
 	protected override void OnInitialized()
 	{
 		RefreshSessions();
-		SessionMonitor.SessionsChanged += OnSessionsChanged;
-		PanelState.SessionStateChanged += OnStateChanged;
-		PanelState.PartitionStateChanged += OnStateChanged;
-		PanelState.ZoneStateChanged += OnStateChanged;
+		_feed = Domain.PanelChangeFeed.Start(PanelState, c =>
+		{
+			if (c is Domain.SessionsChanged) OnSessionsChanged();
+			else OnStateChanged();
+		});
 
-		_clockTimer = new Timer(_ => InvokeAsync(() =>
+		_clockTimer = Time.CreateTimer(_ => InvokeAsync(() =>
 		{
 			if (_disposed) return;
 			try
@@ -305,7 +306,9 @@
 		_renderDirty = true;
 	}
 
-	private void OnStateChanged(object? sender, EventArgs e)
+	private Domain.PanelChangeFeed? _feed;
+
+	private void OnStateChanged()
 	{
 		_renderDirty = true;
 	}
@@ -364,7 +367,7 @@
 
 	private string GetPartitionDisplayText(PartitionState partition)
 	{
-		return partition.EffectiveStatus switch
+		return partition.EffectiveStatusAt(Time.GetUtcNow().UtcDateTime) switch
 		{
 			PartitionStatus.Disarmed => "Disarmed",
 			PartitionStatus.ArmedAway => "Armed Away",
@@ -383,7 +386,7 @@
 		};
 	}
 
-	private Color GetPartitionChipColor(PartitionState partition) => partition.EffectiveStatus switch
+	private Color GetPartitionChipColor(PartitionState partition) => partition.EffectiveStatusAt(Time.GetUtcNow().UtcDateTime) switch
 	{
 		PartitionStatus.Arming => Color.Warning,
 		PartitionStatus.Pending => Color.Warning,
@@ -479,10 +482,7 @@
 	{
 		_disposed = true;
 		_clockTimer?.Dispose();
-		SessionMonitor.SessionsChanged -= OnSessionsChanged;
-		PanelState.SessionStateChanged -= OnStateChanged;
-		PanelState.PartitionStateChanged -= OnStateChanged;
-		PanelState.ZoneStateChanged -= OnStateChanged;
+		_feed?.Dispose();
 	}
 
 	private bool HasDefaultAccessCode(string? sessionId) =>

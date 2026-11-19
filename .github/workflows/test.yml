@@ -12,6 +12,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The suite must not depend on thread scheduling: run it repeatedly with 1 and 2 cores.
+    strategy:
+      fail-fast: false
+      matrix:
+        cores: [1, 2]
     # Same SDK image and digest as the Dockerfile's build stage; keep the two in sync.
     container: mcr.microsoft.com/dotnet/sdk:10.0@sha256:de4fe90a98845d75910b9769662465c84de1a934665c431279d1382b2bddc02b
 
@@ -19,5 +24,27 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Run tests
-        run: dotnet test NeoHub/TLink.Tests/DSC.TLink.Tests.csproj -c Release
+      # The banned-API analyzer (BannedSymbols.txt) can't see the lock statement; this can.
+      - name: No locks in product code
+        shell: bash
+        run: |
+          if grep -rnE '\block\s*\(|MethodImplOptions\.Synchronized' --include='*.cs' --include='*.razor' NeoHub/TLink NeoHub/NeoHub \
+               | grep -v '/obj/\|/bin/'; then
+            echo "::error::lock statements are not allowed; use a Channel<T> actor or Snapshot<T> (docs/Architecture.md)"
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          dotnet build NeoHub/TLink.Tests/DSC.TLink.Tests.csproj -c Release
+          dotnet build NeoHub/NeoHub.Tests/NeoHub.Tests.csproj -c Release
+
+      - name: Test (10 runs, ${{ matrix.cores }} core(s))
+        env:
+          DOTNET_PROCESSOR_COUNT: ${{ matrix.cores }}
+        shell: bash
+        run: |
+          for i in $(seq 1 10); do
+            dotnet test NeoHub/TLink.Tests/DSC.TLink.Tests.csproj -c Release --no-build --blame-hang-timeout 120s
+            dotnet test NeoHub/NeoHub.Tests/NeoHub.Tests.csproj -c Release --no-build --blame-hang-timeout 120s
+          done

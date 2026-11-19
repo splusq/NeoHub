@@ -6,7 +6,7 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Reflection;
 using DSC.TLink.ITv2.Messages;
 
@@ -19,7 +19,10 @@ namespace DSC.TLink.Serialization
     /// </summary>
     internal static class BinarySerializer
     {
-        private static readonly ConcurrentDictionary<Type, TypePlan> _planCache = new();
+        // Every plan, built once when the serializer is first used: all message types in this
+        // assembly plus the element types they contain. Read-only from then on, so it needs no
+        // synchronization.
+        private static readonly FrozenDictionary<Type, TypePlan> _plans = BuildAllPlans();
 
         /// <summary>
         /// Serialize a POCO to bytes.
@@ -67,10 +70,8 @@ namespace DSC.TLink.Serialization
             return (result, offset);
         }
 
-        /// <summary>
-        /// Clear the plan cache. Useful for testing or if types are dynamically modified.
-        /// </summary>
-        public static void ClearCache() => _planCache.Clear();
+        /// <summary>Whether <paramref name="type"/>'s plan was built up front (tests check every message type is).</summary>
+        internal static bool HasPlan(Type type) => _plans.ContainsKey(type);
 
         #region Serialize/Deserialize dispatch
 
@@ -96,7 +97,7 @@ namespace DSC.TLink.Serialization
                         break;
 
                     case SerializerKind.CompactInteger:
-                        CompactIntegerSerializer.Write(bytes, pp.Property.PropertyType, pp.Property.GetValue(instance));
+                        CompactIntegerSerializer.Write(bytes, pp.Property.PropertyType, pp.Property.GetValue(instance), pp.CompactMinBytes);
                         break;
 
                     case SerializerKind.UnicodeString:
@@ -162,6 +163,11 @@ namespace DSC.TLink.Serialization
                             PrimitiveSerializer.WriteEnum(bytes, pp.TypeCode, element);
                         break;
                     }
+
+                    case SerializerKind.DateTime:
+                        // Was missing: DateTime fields were read but silently dropped on write.
+                        DateTimeSerializer.Write(bytes, pp.DateTimeFormat, pp.Property.GetValue(instance), pp.IsNullable);
+                        break;
 
                     case SerializerKind.MultipleMessagePacket:
                         MultipleMessagePacketSerializer.Write(bytes, pp.Property.GetValue(instance) as IMessageData[]);
@@ -304,9 +310,30 @@ namespace DSC.TLink.Serialization
 
         #region Plan building (all reflection happens here, once per type)
 
+        // A type outside the table (one defined elsewhere) still works; its plan just isn't kept.
         private static TypePlan GetOrCreatePlan(Type type)
+            => _plans.TryGetValue(type, out var plan) ? plan : BuildPlan(type);
+
+        private static FrozenDictionary<Type, TypePlan> BuildAllPlans()
         {
-            return _planCache.GetOrAdd(type, BuildPlan);
+            var plans = new Dictionary<Type, TypePlan>();
+            var pending = new Queue<Type>(typeof(IMessageData).Assembly.GetTypes()
+                .Where(t => typeof(IMessageData).IsAssignableFrom(t) && t is { IsClass: true, IsAbstract: false }
+                         && t.GetConstructor(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, Type.EmptyTypes) is not null)
+                .OrderBy(t => t.FullName, StringComparer.Ordinal));
+            while (pending.TryDequeue(out var type))
+            {
+                if (plans.ContainsKey(type))
+                    continue;
+                TypePlan plan;
+                try { plan = BuildPlan(type); }
+                catch (Exception) { continue; }   // fails again, with its real error, if it is ever used
+                plans[type] = plan;
+                foreach (var pp in plan.Properties)
+                    if (pp.Kind == SerializerKind.ObjectArrayLeadingLength && pp.ElementType is { } element)
+                        pending.Enqueue(element);
+            }
+            return plans.ToFrozenDictionary();
         }
 
         private static TypePlan BuildPlan(Type type)
@@ -417,6 +444,8 @@ namespace DSC.TLink.Serialization
                     Property = property,
                     Kind = SerializerKind.CompactInteger,
                     TypeCode = Type.GetTypeCode(propType),
+                    CompactMinBytes = property.GetCustomAttributes(typeof(CompactIntegerAttribute), false)
+                        .Cast<CompactIntegerAttribute>().First().MinBytes,
                 };
             }
 

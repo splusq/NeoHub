@@ -22,7 +22,7 @@ namespace DSC.TLink.Serialization
     /// </summary>
     internal static class CompactIntegerSerializer
     {
-        internal static void Write(List<byte> bytes, Type propertyType, object? value)
+        internal static void Write(List<byte> bytes, Type propertyType, object? value, int minBytes = 1)
         {
             var underlyingType = propertyType.IsEnum ? Enum.GetUnderlyingType(propertyType) : propertyType;
             var rawValue = value != null && propertyType.IsEnum
@@ -30,7 +30,7 @@ namespace DSC.TLink.Serialization
                 : value ?? GetDefaultValue(underlyingType);
 
             byte[] fullBytes = PrimitiveSerializer.GetBytes(rawValue, underlyingType);
-            int startIndex = FindSignificantByteIndex(fullBytes);
+            int startIndex = Math.Min(FindSignificantByteIndex(fullBytes), Math.Max(0, fullBytes.Length - minBytes));
             int length = fullBytes.Length - startIndex;
 
             bytes.Add((byte)length);

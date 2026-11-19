@@ -46,4 +46,21 @@ public class PanelConfigurationState
             PartitionLabels,
         ];
     }
+
+    /// <summary>
+    /// A deep copy (each section exported and imported). Installer configuration held by the
+    /// panel state store is never modified once published: code that wants to change it edits a
+    /// clone and publishes the clone with <see cref="Domain.ConfigurationReplaced"/>.
+    /// </summary>
+    public PanelConfigurationState Clone()
+    {
+        var copy = new PanelConfigurationState(Capabilities) { LastReadAt = LastReadAt };
+        for (int i = 0; i < AllSections.Count; i++)
+        {
+            var data = AllSections[i].Export();
+            if (data.Length > 0)   // an unread section stays unread in the copy
+                copy.AllSections[i].Import(data);
+        }
+        return copy;
+    }
 }
