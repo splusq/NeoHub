@@ -1,3 +1,5 @@
+using DSC.TLink.ITv2.Runtime;
+using Microsoft.Extensions.Time.Testing;
 using DSC.TLink.ITv2;
 using DSC.TLink.ITv2.Enumerations;
 using DSC.TLink.ITv2.Messages;
@@ -118,6 +120,41 @@ public class PanelConnectionTests
         Assert.True(panel.Transport.Disposed);
         Assert.Equal(TLinkErrorCode.Disconnected, (await panel.Connection.SendAsync(Arm())).Error!.Value.Code);
     }
+
+    /// <summary>
+    /// Live trial 2026-11-19: the timer fired a moment before the readiness deadline (as the
+    /// core's clock saw it); that tick changed nothing and the timer was never re-armed, so the
+    /// session never became ready and the panel hung up two minutes later. Here every timer
+    /// fires 1 ms early.
+    /// </summary>
+    [Fact]
+    public async Task TimerFiringEarly_IsReArmed_SoReadinessAndHeartbeatsStillHappen()
+    {
+        var time = new FakeTimeProvider();
+        await using var panel = new PanelSimulator(time, connectionClock: new EarlyTimers(time));
+        await panel.HandshakeAsync();
+
+        // The timer fires 1 ms early: not ready yet. 1 ms later, ready: a request goes out.
+        await panel.AdvanceAsync(panel.Timings.ReadyQuietPeriod - TimeSpan.FromMilliseconds(1));
+        var request = panel.Connection.SendAsync(Arm());
+        await panel.AdvanceAsync(TimeSpan.FromMilliseconds(1));
+        var sent = await panel.ReceiveAsync<PartitionArm>();
+        panel.Respond(sent);
+        Assert.True((await request.WaitAsync(PanelSimulator.Guard)).IsSuccess);
+
+        // The heartbeat is driven by the same timer.
+        await panel.AdvanceAsync(panel.Timings.HeartbeatInterval - TimeSpan.FromMilliseconds(1));
+        await panel.AdvanceAsync(TimeSpan.FromMilliseconds(1));
+        Assert.IsType<ConnectionPoll>((await panel.ReceiveAsync<ConnectionPoll>()).Message);
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(1999.7, 2000)]
+    [InlineData(2000, 2000)]
+    [InlineData(0.0001, 1)]
+    public void TimerDelay_IsRoundedUpToWholeMilliseconds(double remainingMs, double expectedMs)
+        => Assert.Equal(TimeSpan.FromMilliseconds(expectedMs), PanelConnection.Delay(TimeSpan.FromMilliseconds(remainingMs)));
 
     [Fact]
     public async Task Dispose_WhenReady_SaysGoodbye_ThenCloses()

@@ -23,6 +23,8 @@ internal sealed class PanelConnection : IITv2Session
     private sealed record Send(IMessageData Message, TaskCompletionSource<Result<IMessageData>> Reply) : Envelope;
     private sealed record Cancel(TaskCompletionSource<Result<IMessageData>> Reply) : Envelope;
     private sealed record CloseNow : Envelope;
+    /// <summary>The one timer fired. It is no longer armed, whatever deadline it was aimed at.</summary>
+    private sealed record TimerFired(DateTimeOffset Now) : Envelope;
     private sealed record Barrier(TaskCompletionSource Reached) : Envelope;
 
     /// <summary>Bound on a single socket write; a peer that stops reading must not stall the loop.</summary>
@@ -132,7 +134,7 @@ internal sealed class PanelConnection : IITv2Session
         using var readerStop = new CancellationTokenSource();
         var reader = ReadFramesAsync(readerStop.Token);
         using var timer = _time.CreateTimer(
-            _ => _inbox.Writer.TryWrite(new Core(new Tick(_time.GetUtcNow()))),
+            _ => _inbox.Writer.TryWrite(new TimerFired(_time.GetUtcNow())),
             null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         DateTimeOffset? scheduled = null;
 
@@ -145,6 +147,7 @@ internal sealed class PanelConnection : IITv2Session
                 {
                     Core c => c.Input,
                     CloseNow => new CloseRequested(now),
+                    TimerFired t => Fired(t),
                     Send s => Register(s, now),
                     Cancel c => ids.TryGetValue(c.Reply, out var id) ? new CancelRequested(now, id) : null,
                     Barrier b => Reach(b),
@@ -167,12 +170,16 @@ internal sealed class PanelConnection : IITv2Session
                 if (state.Phase == Phase.Closed)
                     break;
 
-                // One timer, aimed at the core's next deadline.
+                // One timer, aimed at the core's next deadline. Re-armed after it fires even if the
+                // deadline is unchanged: the timer runs on the monotonic clock and the core on
+                // GetUtcNow, so it can fire a moment before the deadline the core sees, and that
+                // tick changes nothing. Without re-arming, the connection then waited for the next
+                // packet: readiness and heartbeats stalled until the panel gave up (2026-11-19).
                 var due = Connection.NextDeadline(state);
                 if (due != scheduled)
                 {
                     scheduled = due;
-                    timer.Change(due is { } d ? Max(d - _time.GetUtcNow(), TimeSpan.Zero) : Timeout.InfiniteTimeSpan,
+                    timer.Change(due is { } d ? Delay(d - _time.GetUtcNow()) : Timeout.InfiniteTimeSpan,
                         Timeout.InfiniteTimeSpan);
                 }
             }
@@ -206,6 +213,12 @@ internal sealed class PanelConnection : IITv2Session
             scope?.Dispose();
         }
 
+        ConnectionInput Fired(TimerFired t)
+        {
+            scheduled = null;   // the timer is spent; arm it again below if the deadline is still ahead
+            return new Tick(t.Now);
+        }
+
         static ConnectionInput? Reach(Barrier b)
         {
             b.Reached.TrySetResult();
@@ -224,6 +237,11 @@ internal sealed class PanelConnection : IITv2Session
         {
             switch (effect)
             {
+                case FrameDecoded d:
+                    _logger.LogDebug("RX [{Sender}→{Receiver}] {Type}", d.Packet.SenderSequence, d.Packet.ReceiverSequence, d.Packet.Message.GetType().Name);
+                    _logger.LogTrace("RX bytes: {Bytes}", new HexBytes(d.Plaintext));
+                    break;
+
                 case WriteFrame w:
                     _logger.LogDebug("TX [{Sender}→{Receiver}] {Type}", w.Packet.SenderSequence, w.Packet.ReceiverSequence, w.Packet.Message.GetType().Name);
                     _logger.LogTrace("TX bytes: {Bytes}", new HexBytes(w.Plaintext));
@@ -316,4 +334,16 @@ internal sealed class PanelConnection : IITv2Session
     }
 
     private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+
+    /// <summary>
+    /// Timers count whole milliseconds and truncate, which would fire up to 1 ms early; round the
+    /// delay up instead. (Firing early is still survived: see the re-arm in the loop.)
+    /// </summary>
+    internal static TimeSpan Delay(TimeSpan remaining)
+    {
+        if (remaining <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+        var ms = TimeSpan.TicksPerMillisecond;
+        return TimeSpan.FromTicks((remaining.Ticks + ms - 1) / ms * ms);
+    }
 }

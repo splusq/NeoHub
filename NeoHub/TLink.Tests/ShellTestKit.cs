@@ -78,7 +78,10 @@ internal sealed class PanelSimulator : IAsyncDisposable
     public ConnectionTimings Timings { get; }
     public string PanelId { get; }
 
-    public PanelSimulator(FakeTimeProvider? time = null, ConnectionTimings? timings = null, bool knownPanel = true, string panelId = "200000000001")
+    /// <param name="connectionClock">The clock the connection itself sees, when it should differ from
+    /// <see cref="Time"/> (e.g. <see cref="EarlyTimers"/>); the test still drives <see cref="Time"/>.</param>
+    public PanelSimulator(FakeTimeProvider? time = null, ConnectionTimings? timings = null, bool knownPanel = true, string panelId = "200000000001",
+        TimeProvider? connectionClock = null)
     {
         Time = time ?? new FakeTimeProvider();
         Timings = timings ?? ConnectionTimings.Default;
@@ -87,7 +90,7 @@ internal sealed class PanelSimulator : IAsyncDisposable
         Connection = PanelConnection.Start(
             Transport,
             (_, type) => knownPanel ? new ConnectionCredentials(type, null, AccessCode) : null,
-            Time,
+            connectionClock ?? Time,
             new ConnectionConfig(Timings, LocalRandom),
             NullLogger.Instance);
     }
@@ -160,5 +163,32 @@ internal sealed class PanelSimulator : IAsyncDisposable
     {
         Transport.Hangup();
         await Connection.Completion.WaitAsync(Guard);
+    }
+}
+
+/// <summary>
+/// A clock whose timers fire 1 ms before they are due, as a real timer can relative to the
+/// wall clock: System.Threading.Timer counts whole milliseconds on the monotonic clock, while
+/// deadlines are compared with GetUtcNow. Time itself is <paramref name="inner"/>'s.
+/// </summary>
+internal sealed class EarlyTimers(FakeTimeProvider inner) : TimeProvider
+{
+    private static readonly TimeSpan Early = TimeSpan.FromMilliseconds(1);
+
+    public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
+    public override long GetTimestamp() => inner.GetTimestamp();
+    public override long TimestampFrequency => inner.TimestampFrequency;
+    public override TimeZoneInfo LocalTimeZone => inner.LocalTimeZone;
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        => new Timer(inner.CreateTimer(callback, state, Shift(dueTime), period));
+
+    private static TimeSpan Shift(TimeSpan due) => due > Early && due != Timeout.InfiniteTimeSpan ? due - Early : due;
+
+    private sealed class Timer(ITimer timer) : ITimer
+    {
+        public bool Change(TimeSpan dueTime, TimeSpan period) => timer.Change(Shift(dueTime), period);
+        public void Dispose() => timer.Dispose();
+        public ValueTask DisposeAsync() => timer.DisposeAsync();
     }
 }
