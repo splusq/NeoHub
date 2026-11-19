@@ -249,14 +249,15 @@ internal static class Connection
         if (s.Phase == Phase.Bursting)
             s = s with { ReadyDue = Min(f.Now + s.Config.Timings.ReadyQuietPeriod, s.BurstStartedAt + s.Config.Timings.MaxReadyWait) };
 
-        var decoded = PacketCodec.Decode(f.Payload, s.InboundKey);
+        var decoded = PacketCodec.DecodeFrame(f.Payload, s.InboundKey);
         if (decoded.IsFailure)
         {
             fx.Add(new Diagnostic(LogLevel.Warning, $"ITv2 parse error: {decoded.Error}"));
             return s;
         }
 
-        var packet = decoded.Value;
+        var packet = decoded.Value.Packet;
+        fx.Add(new FrameDecoded(packet, decoded.Value.Frame));
         s = s with { RemoteSequence = packet.SenderSequence, LastReceiveAt = f.Now };
 
         // Every non-ack inbound message is acked first, before anything it triggers.
@@ -339,14 +340,15 @@ internal static class Connection
             return s;
         }
 
-        var decoded = PacketCodec.Decode(f.Payload, s.InboundKey);
+        var decoded = PacketCodec.DecodeFrame(f.Payload, s.InboundKey);
         if (decoded.IsFailure)
         {
             fx.Add(new Diagnostic(LogLevel.Warning, $"ITv2 parse error: {decoded.Error}"));
             return s;
         }
 
-        var packet = decoded.Value;
+        var packet = decoded.Value.Packet;
+        fx.Add(new FrameDecoded(packet, decoded.Value.Frame));
         s = s with { RemoteSequence = packet.SenderSequence, LastReceiveAt = f.Now };
 
         switch (s.Phase)

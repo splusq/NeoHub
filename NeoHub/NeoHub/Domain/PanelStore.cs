@@ -164,10 +164,25 @@ namespace NeoHub.Domain
 
         private void Deliver(PanelChange change, List<Channel<PanelChange>> subscribers)
         {
-            if (change is SessionRemoved removed)
-                _logger.LogInformation("Removed session state for {Session}", removed.SessionId);
-            else if (change is ConfigurationCompleted)
-                _logger.LogInformation("Configuration complete");
+            // State as it changes, so the log alone shows what the panel reported (numbers only, no labels).
+            switch (change)
+            {
+                case SessionRemoved removed:
+                    _logger.LogInformation("Removed session state for {Session}", removed.SessionId);
+                    break;
+                case ConfigurationCompleted:
+                    _logger.LogInformation("Configuration complete");
+                    break;
+                case PartitionChanged { Partition: var p }:
+                    _logger.LogDebug("State: partition {Partition} {Status} ready={Ready} exitDelay={ExitDelay}",
+                        p.PartitionNumber, p.Status, p.IsReady, p.ExitDelayActive);
+                    break;
+                case ZoneChanged { Zone: var z }:
+                    _logger.LogDebug("State: zone {Zone} {Open}{Bypassed}{Faulted}{Tampered}",
+                        z.ZoneNumber, z.IsOpen ? "open" : "closed",
+                        z.IsBypassed ? " bypassed" : "", z.IsFaulted ? " faulted" : "", z.IsTampered ? " tampered" : "");
+                    break;
+            }
 
             for (int i = subscribers.Count - 1; i >= 0; i--)
             {

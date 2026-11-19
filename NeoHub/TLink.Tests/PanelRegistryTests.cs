@@ -125,4 +125,34 @@ public class PanelRegistryTests
         Assert.Same(b.Connection, fx.Registry.Find("200000000002"));
         Assert.Equal(["200000000002"], fx.Registry.GetActiveSessions());
     }
+
+    /// <summary>
+    /// Shutdown says goodbye to every panel at the very start (StoppingAsync), before the web
+    /// server's own graceful-shutdown wait. Before this, the panel was cut off without
+    /// END_SESSION when the container was killed, and took minutes to reconnect.
+    /// </summary>
+    [Fact]
+    public async Task Shutdown_SaysGoodbyeToEveryPanel_BeforeAnythingElseStops()
+    {
+        await using var fx = new Fixture();
+        await using var one = new PanelSimulator();
+        await using var two = new PanelSimulator(panelId: "200000000002");
+        await one.ReadyAsync();
+        await two.ReadyAsync();
+        fx.Registry.Register(one.Connection);
+        fx.Registry.Register(two.Connection);
+        await fx.NextEventAsync();
+        await fx.NextEventAsync();
+
+        var shutdown = new DSC.TLink.ITv2.Sessions.SessionShutdownService(fx.Registry, TimeProvider.System,
+            NullLogger<DSC.TLink.ITv2.Sessions.SessionShutdownService>.Instance);
+        Assert.IsAssignableFrom<Microsoft.Extensions.Hosting.IHostedLifecycleService>(shutdown);
+        var stopping = shutdown.StoppingAsync(CancellationToken.None);
+
+        Assert.IsType<ConnectionEndSession>((await one.ReceiveAsync()).Message);
+        Assert.IsType<ConnectionEndSession>((await two.ReceiveAsync()).Message);
+        await stopping.WaitAsync(PanelSimulator.Guard);
+        Assert.True(one.Transport.Disposed);
+        Assert.True(two.Transport.Disposed);
+    }
 }
