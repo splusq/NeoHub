@@ -137,6 +137,19 @@ Anything that depends on the time takes `now` as a parameter: `EffectiveStatusAt
 - **Logs never block.** The diagnostics buffer drops a slow subscriber's oldest entries rather
   than make a logger wait.
 
+### Timers and shutdown (lessons from the live trial)
+
+- **Re-arm after every fire.** Timers run on the monotonic clock and count whole milliseconds,
+  while the core compares deadlines with `GetUtcNow`, so a timer can fire a moment before the
+  deadline the core sees. `PanelConnection` therefore re-arms after every fire if the deadline is
+  still ahead, and rounds delays up. The fake clock can't show this, so
+  `TimerFiringEarly_IsReArmed_SoReadinessAndHeartbeatsStillHappen` runs on a clock whose timers
+  fire 1 ms early.
+- **Say goodbye when shutdown begins.** `SessionShutdownService` sends END_SESSION in
+  `StoppingAsync`, before any service stops. Kestrel otherwise waits for open connections first,
+  and the container is killed before the panel hears anything. WebSocket clients are closed at
+  the same moment.
+
 ### Waiting for the panel
 
 Never poll a snapshot in a loop: it is immutable and will never change. To wait for the panel,

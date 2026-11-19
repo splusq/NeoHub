@@ -74,6 +74,22 @@ public class ConnectionReplayTests
         Assert.Equal(CommandResponseCode.FunctionNotAvailable, second.ResponseCode);
     }
 
+    /// <summary>
+    /// Every packet received is reported, decrypted, as the captured frame bytes, so the
+    /// "RX bytes" trace log (which CaptureTool reads) shows exactly what the panel sent.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(FixtureFiles))]
+    public void EveryReceivedPacket_IsReportedAsTheCapturedFrame(string fixture)
+    {
+        var records = CapturedTraffic.Load(Path.Combine(CapturedTraffic.Directory, fixture));
+        var replay = Replay.Run(records);
+
+        var captured = records.Where(r => r.IsPacket && r.Dir == "rx").Select(r => r.Frame!).ToList();
+        var reported = replay.Effects.OfType<FrameDecoded>().Select(d => Convert.ToHexString(d.Plaintext)).ToList();
+        Assert.Equal(captured, reported);
+    }
+
     [Fact]
     public void ZoneChanges_ArePublished_InOrder()
     {

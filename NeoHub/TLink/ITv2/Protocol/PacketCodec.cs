@@ -24,19 +24,30 @@ internal static class PacketCodec
     /// <summary>Decrypts (if keyed), trims AES padding using the length field, checks the CRC and decodes.</summary>
     public static Result<ITv2Packet> Decode(byte[] payload, byte[]? key)
     {
+        var decoded = DecodeFrame(payload, key);
+        return decoded.IsFailure ? Result<ITv2Packet>.Fail(decoded.Error!.Value) : decoded.Value.Packet;
+    }
+
+    /// <summary>
+    /// As <see cref="Decode"/>, also returning the decrypted frame ([length][seq][seq][command][payload][CRC]),
+    /// the same bytes <see cref="WriteFrame.Plaintext"/> carries for outbound packets.
+    /// </summary>
+    public static Result<(ITv2Packet Packet, byte[] Frame)> DecodeFrame(byte[] payload, byte[]? key)
+    {
         try
         {
             var plain = key is null ? payload : ITv2Crypto.Decrypt(key, payload);
-            ReadOnlySpan<byte> span = TrimToFrame(plain);
+            var frame = TrimToFrame(plain).ToArray();
+            ReadOnlySpan<byte> span = frame;
             ITv2Framing.RemoveFraming(ref span);
             if (span.Length < 2)
-                return Result<ITv2Packet>.Fail(TLinkErrorCode.PacketParseError, "Packet too short");
+                return Result<(ITv2Packet, byte[])>.Fail(TLinkErrorCode.PacketParseError, "Packet too short");
             var message = MessageFactory.DeserializeMessage(span[2..]);
-            return new ITv2Packet(span[0], span[1], message);
+            return (new ITv2Packet(span[0], span[1], message), frame);
         }
         catch (Exception ex)
         {
-            return Result<ITv2Packet>.Fail(TLinkErrorCode.PacketParseError, $"Failed to parse ITv2 packet: {ex.Message}");
+            return Result<(ITv2Packet, byte[])>.Fail(TLinkErrorCode.PacketParseError, $"Failed to parse ITv2 packet: {ex.Message}");
         }
     }
 

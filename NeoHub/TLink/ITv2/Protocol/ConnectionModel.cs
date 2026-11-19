@@ -52,6 +52,9 @@ internal abstract record ConnectionEffect;
 /// <summary>Write one packet. <see cref="Wire"/> is what goes on the socket (encrypted once keys exist).</summary>
 internal sealed record WriteFrame(ITv2Packet Packet, byte[] Plaintext, byte[] Wire) : ConnectionEffect;
 
+/// <summary>An inbound packet was decrypted and decoded (for logging: the counterpart of <see cref="WriteFrame"/>).</summary>
+internal sealed record FrameDecoded(ITv2Packet Packet, byte[] Plaintext) : ConnectionEffect;
+
 /// <summary>Look up credentials for this panel; answer with <see cref="CredentialsResolved"/>.</summary>
 internal sealed record ResolveCredentials(string SessionId, EncryptionType EncryptionType) : ConnectionEffect;
 

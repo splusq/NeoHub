@@ -20,13 +20,18 @@ namespace NeoHub.Api.WebSocket
         private readonly IPanelCommandService _commandService;
         private readonly TimeProvider _time;
         private readonly ILogger<PanelWebSocketHandler> _logger;
+        private readonly CancellationToken _stopping;
 
         public PanelWebSocketHandler(
             ClientHub hub,
             IPanelCommandService commandService,
             TimeProvider time,
-            ILogger<PanelWebSocketHandler> logger)
+            ILogger<PanelWebSocketHandler> logger,
+            IHostApplicationLifetime? lifetime = null)
         {
+            // Clients are closed as soon as shutdown begins, so they never hold Kestrel's
+            // graceful-shutdown wait open.
+            _stopping = lifetime?.ApplicationStopping ?? CancellationToken.None;
             _hub = hub;
             _commandService = commandService;
             _time = time;
@@ -45,7 +50,8 @@ namespace NeoHub.Api.WebSocket
 
             using var socket = await context.WebSockets.AcceptWebSocketAsync();
             _logger.LogInformation("WebSocket connection from {RemoteIp}", context.Connection.RemoteIpAddress);
-            await RunClientAsync(socket, context.RequestAborted);
+            using var ended = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, _stopping);
+            await RunClientAsync(socket, ended.Token);
         }
 
         /// <summary>Serves one connected socket until it closes.</summary>
