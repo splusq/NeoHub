@@ -42,12 +42,11 @@ services:
     image: ghcr.io/splusq/neohub:latest
     container_name: neohub
     ports:
-      - "8080:5181"
-      - "8443:8181"
+      - "8080:8080"
+      - "8443:8443"
       - "3072:3072"
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
-      - ASPNETCORE_URLS=http://+:8080
       - EnableHttps=false
     volumes:
       - ./persist:/app/persist
@@ -62,11 +61,10 @@ Alternatively, you can run the container directly using the Docker CLI:
 
 ````````
 docker run -d --name neohub \
-  -p 8080:5181 \
-  -p 8443:8181 \
+  -p 8080:8080 \
+  -p 8443:8443 \
   -p 3072:3072 \
   -e ASPNETCORE_ENVIRONMENT=Production \
-  -e ASPNETCORE_URLS=http://+:8080 \
   -e EnableHttps=false \
   -v ./persist:/app/persist \
   ghcr.io/splusq/neohub:latest
@@ -260,8 +258,8 @@ A definition describes how the panel treats a zone, not what is wired to it: a g
 
 | Port | Protocol | Purpose |
 |---|---|---|
-| `5181` | HTTP | Web UI |
-| `7013` | HTTPS | Web UI (secure) |
+| `8080` | HTTP | Web UI and `/api/ws` (`HttpPort`) |
+| `8443` | HTTPS | Web UI, only with `EnableHttps=true` (`HttpsPort`) |
 | `3072` | TCP | Panel ITv2 connection (configurable) |
 
 ---

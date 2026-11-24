@@ -200,8 +200,14 @@ namespace NeoHub.Api.WebSocket
 
         private void Report(WebSocketClient client, PanelCommandResult result, string fallback)
         {
-            if (!result.Success)
-                SendError(client, result.ErrorMessage ?? fallback);
+            if (result.Success)
+                return;
+
+            // Information, not Warning: the failure itself is logged where it happened
+            // (PanelSender for a panel rejection), so this only records the reply.
+            var error = result.ErrorMessage ?? fallback;
+            _logger.LogInformation("Client {ClientId} → error: {Message}", client.Id, error);
+            client.Post(new ErrorMessage { Message = error });
         }
 
         private void SendError(WebSocketClient client, string error)

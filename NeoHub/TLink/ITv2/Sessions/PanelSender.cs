@@ -44,9 +44,12 @@ namespace DSC.TLink.ITv2.Sessions
             try
             {
                 var result = await session.SendAsync(request.MessageData, cancellationToken);
+                var command = request.MessageData.GetType().Name;
 
                 if (result.IsFailure)
                 {
+                    _logger.LogWarning("{Command} failed: [{Code}] {Error}",
+                        command, result.Error!.Value.Code, result.Error.Value.Message);
                     return new SessionResponse
                     {
                         Success = false,
@@ -69,8 +72,10 @@ namespace DSC.TLink.ITv2.Sessions
 
                 if (result.Value is CommandResponse { ResponseCode: not CommandResponseCode.Success } errorResponse)
                 {
-                    _logger.LogWarning("Panel rejected command: [{Code}] {Description}",
-                        errorResponse.ResponseCode, errorResponse.ResponseCode.Description());
+                    // Name the command: the panel reuses one response code for several
+                    // unrelated errors, so the description alone doesn't say what failed.
+                    _logger.LogWarning("Panel rejected {Command}: [{Code}] {Description}",
+                        command, errorResponse.ResponseCode, errorResponse.ResponseCode.Description());
 
                     return new SessionResponse
                     {
