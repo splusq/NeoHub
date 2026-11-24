@@ -34,6 +34,11 @@ RUN dotnet publish "NeoHub.csproj" -c Release -a $TARGETARCH -o /app/publish \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled@sha256:c89a6a61f494f20a5ae302990e814627a8d91b332fd4a8e7c1707c2d4da9555d AS runtime
 WORKDIR /app
 
+# The base image sets ASPNETCORE_HTTP_PORTS=8080, but Program.cs binds its own
+# ports (HttpPort/HttpsPort), so Kestrel would log "Overriding address(es)" at
+# every start. Clear it; the app still listens on 8080 by default.
+ENV ASPNETCORE_HTTP_PORTS=
+
 # Expose ports
 EXPOSE 8080
 EXPOSE 8443

@@ -55,6 +55,7 @@ namespace NeoHub.Services
 
             if (string.IsNullOrEmpty(code))
             {
+                _logger.LogWarning("Disarm refused: no access code given and no default code configured");
                 return PanelCommandResult.Error("Access code is required to disarm");
             }
 
@@ -77,7 +78,10 @@ namespace NeoHub.Services
             var code = accessCode ?? conn?.DefaultAccessCode;
 
             if (string.IsNullOrEmpty(code))
+            {
+                _logger.LogWarning("Bypass refused: no access code given and no default code configured");
                 return PanelCommandResult.Error("Access code is required to bypass zones");
+            }
 
             _logger.LogInformation(
                 "Bypass command: Partition={Partition}, Zone={Zone}, Bypass={Bypass}, UsingDefaultCode={UsingDefault}",
@@ -139,8 +143,7 @@ namespace NeoHub.Services
                 if (response.Success)
                     return PanelCommandResult.Ok();
 
-                _logger.LogWarning("Command failed: [{Code}] {Error}", response.ErrorCode, response.ErrorMessage);
-
+                // PanelSender has already logged why (with the command and the panel's code).
                 return response.ErrorCode.HasValue
                     ? PanelCommandResult.Error(response.ErrorCode.Value, response.ErrorMessage ?? response.ErrorCode.Value.ToString())
                     : PanelCommandResult.Error(response.ErrorMessage ?? "Unknown error");

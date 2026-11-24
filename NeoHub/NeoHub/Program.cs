@@ -139,10 +139,17 @@ namespace NeoHub
             if (!app.Environment.IsDevelopment())
             {
                 app.UseExceptionHandler("/Error");
-                app.UseHsts();
             }
 
-            app.UseHttpsRedirection();
+            // HSTS and the HTTPS redirect only make sense when Kestrel has an HTTPS
+            // endpoint. Without one, the redirect middleware logs a warning at startup
+            // ("Failed to determine the https port for redirect") and does nothing.
+            if (app.Configuration.GetValue("EnableHttps", false))
+            {
+                if (!app.Environment.IsDevelopment())
+                    app.UseHsts();
+                app.UseHttpsRedirection();
+            }
             app.UseStaticFiles();
             app.UseAntiforgery();
 
